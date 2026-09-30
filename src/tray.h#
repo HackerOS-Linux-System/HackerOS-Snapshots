@@ -1,0 +1,63 @@
+mod util
+mod ui
+mod config
+mod store
+mod notify
+
+fn rt_dir() -> string is
+    let d: string = env_get("XDG_RUNTIME_DIR")
+    if d != "" && dir_exists(d) is return d end
+    return "/tmp"
+end
+
+fn alive(pid_file: string) -> bool is
+    if !file_exists(pid_file) is return false end
+    return util::run("kill -0 \"$(cat " + util::sq(pid_file) + ")\" 2>/dev/null") == 0
+end
+
+fn send(fifo: string, line: string) is
+    ;; timeout: a fifo without a reader would block the write forever
+    util::run("timeout 5 sh -c " + util::sq("printf '%s\\n' " + util::sq(line) + " > " + util::sq(fifo)) + " 2>/dev/null")
+end
+
+fn icon_for(state: string) -> string is
+    if state == "error" is return "dialog-error" end
+    if state == "warn" is return "dialog-warning" end
+    return "drive-harddisk"
+end
+
+pub fn run() -> int is
+    if !util::tool_exists("yad") is
+        ui::fail("the tray icon needs yad  (apt install yad)")
+        return 1
+    end
+    let dir: string = rt_dir()
+    let tag: string = to_string(util::uid())
+    let fifo: string = dir + "/hsnap-tray-" + tag + ".fifo"
+    let pid: string = dir + "/hsnap-tray-" + tag + ".pid"
+    let hold: string = dir + "/hsnap-tray-" + tag + ".hold"
+    if alive(pid) is
+        ui::note("the tray icon is already running")
+        return 0
+    end
+
+    let menu: string = "Open HackerOS Snapshots!hackeros-snapshots-gui|Create snapshot now!pkexec hackeros-snapshots create -d Tray|Clean up old snapshots!pkexec hackeros-snapshots cleanup|Quit!quit"
+    let start: string = "rm -f " + util::sq(fifo) + "; mkfifo " + util::sq(fifo) + "; " + "(sleep 2147483647 > " + util::sq(fifo) + " & echo $! > " + util::sq(hold) + "); " + "yad --notification --listen --image=drive-harddisk --text='HackerOS Snapshots' --menu=" + util::sq(menu) + " --command=hackeros-snapshots-gui < " + util::sq(fifo) + " >/dev/null 2>&1 & echo $! > " + util::sq(pid)
+    util::run(start)
+    util::run("sleep 1")
+
+    while alive(pid) is
+        let c: config::Config = config::load()
+        let n: int = array_len(store::ids(c))
+        let state: string = notify::health_field("state", "ok")
+        let msg: string = notify::health_field("message", "")
+        let mut tip: string = "HackerOS Snapshots: " + to_string(n) + " snapshot(s)"
+        if state != "ok" is tip = tip + " — " + msg end
+        send(fifo, "tooltip:" + tip)
+        send(fifo, "icon:" + icon_for(state))
+        util::run("sleep 30")
+    end
+
+    util::run("kill \"$(cat " + util::sq(hold) + " 2>/dev/null)\" 2>/dev/null; rm -f " + util::sq(fifo) + " " + util::sq(pid) + " " + util::sq(hold))
+    return 0
+end
