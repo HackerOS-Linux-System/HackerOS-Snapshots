@@ -1,0 +1,6 @@
+#!/bin/sh
+# HackerOS Snapshots — GRUB submenu with "restore snapshot #N" entries.
+# grub-mkconfig / update-grub run this and collect stdout; the entries are
+# produced by hackeros-snapshots itself so they always match the snapshot store.
+[ -x /usr/bin/hackeros-snapshots ] || exit 0
+exec /usr/bin/hackeros-snapshots grub-entries
