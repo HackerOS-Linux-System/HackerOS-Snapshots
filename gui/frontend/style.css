@@ -1,0 +1,61 @@
+.page { background: #14161c; padding: 14px; }
+.top { padding: 4px; margin: 4px; }
+h1 { color: #e6e9f2; font-size: 24px; }
+h2 { color: #e6e9f2; font-size: 17px; margin: 4px; }
+p  { color: #9aa3b8; font-size: 13px; }
+.sub { color: #8a93a8; font-size: 13px; padding: 3px; margin: 2px; }
+.sel { color: #e6e9f2; font-size: 14px; padding: 4px; margin: 2px; }
+.step { color: #cfd5e6; font-size: 13px; padding: 3px; margin: 2px; }
+.warn { color: #e8c15a; font-size: 13px; padding: 3px; margin: 2px; }
+.err  { color: #ff7b86; font-size: 13px; padding: 3px; margin: 2px; }
+.lbl  { color: #9aa3b8; font-size: 13px; padding: 8px 6px; margin: 1px; }
+
+.card { background: #1d2029; padding: 12px; margin: 6px; border: 1px; border-color: #2c3140; }
+.row { display: flex; flex-direction: row; gap: 8px; margin: 4px; }
+
+.btn { padding: 8px 12px; background: #2c3140; }
+.btn:hover { background: #3a4156; }
+.btn span { color: #e6e9f2; font-size: 13px; }
+.primary { background: #3a5edc; }
+.primary:hover { background: #4f72f0; }
+.danger { background: #8f2f3b; }
+.danger:hover { background: #ab3d4b; }
+.toggle { background: #26304a; }
+.toggle:hover { background: #33405f; }
+.tab { background: #1d2029; padding: 8px 16px; }
+.tab.on { background: #3a5edc; }
+.chip { background: #262a36; padding: 5px 12px; }
+.chip.on { background: #3a5edc; }
+
+input { display: block; width: 170px; padding: 6px; margin: 2px; border: 1px; border-color: #3a4156; background: #14161c; color: #e6e9f2; }
+.num { width: 90px; }
+.wide { width: 380px; }
+
+.thead { display: flex; flex-direction: row; gap: 8px; padding: 6px; margin: 4px; background: #262a36; }
+.thead span { color: #e6e9f2; font-size: 12px; }
+.srow { display: flex; flex-direction: row; gap: 8px; padding: 5px 6px; margin: 1px 4px; background: #191c24; }
+.srow:hover { background: #2a3145; }
+.srow span { color: #cfd5e6; font-size: 13px; }
+.picked { background: #26365e; }
+.drow { display: flex; flex-direction: row; gap: 10px; padding: 4px 6px; margin: 1px 4px; background: #191c24; }
+.drow:hover { background: #2a3145; }
+.drow span { color: #cfd5e6; font-size: 13px; }
+
+.c-mark { width: 14px; }
+.c-id   { width: 54px; }
+.c-type { width: 80px; }
+.c-date { width: 140px; }
+.c-pin  { width: 28px; }
+.c-desc { width: 560px; }
+.c-kind { width: 96px; }
+.c-path { width: 780px; }
+.k-add  { color: #6fdc8c; }
+.k-del  { color: #ff7b86; }
+.k-chg  { color: #e8c15a; }
+.k-ren  { color: #6ec6ff; }
+.k-meta { color: #8a93a8; }
+.k-dir  { color: #6ec6ff; }
+.k-file { color: #cfd5e6; }
+
+.status { padding: 8px; margin: 6px; background: #10121a; }
+.status p { color: #7fdc9a; font-size: 13px; }
