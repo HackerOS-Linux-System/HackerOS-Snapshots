@@ -1,0 +1,18 @@
+[Unit]
+Description=HackerOS Snapshots — boot snapshot, cleanup of old snapshots, timeline
+Documentation=https://github.com/HackerOS-Linux-System/HackerOS-Snapshots
+After=local-fs.target network-online.target
+Wants=local-fs.target network-online.target
+RequiresMountsFor=/.snapshots
+ConditionPathExists=/etc/hackeros-snapshots/config.hk
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hackeros-snapshots daemon
+Nice=10
+IOSchedulingClass=idle
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
