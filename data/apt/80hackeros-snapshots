@@ -1,0 +1,4 @@
+// HackerOS Snapshots: pre/post snapshot around every dpkg run.
+// Disable with:  sudo hackeros-snapshots config set apt_hooks false
+DPkg::Pre-Invoke  { "[ -x /usr/bin/hackeros-snapshots ] && /usr/bin/hackeros-snapshots apt-pre  || true"; };
+DPkg::Post-Invoke { "[ -x /usr/bin/hackeros-snapshots ] && /usr/bin/hackeros-snapshots apt-post || true"; };
