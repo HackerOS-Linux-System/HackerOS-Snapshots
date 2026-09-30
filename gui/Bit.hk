@@ -1,0 +1,21 @@
+[package]
+-> name        => hackeros-snapshots-gui
+-> version     => 0.2.0
+-> description => Silver GUI for HackerOS Snapshots (list, diff, browse, settings, offsite, setup wizard)
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
+-> license     => GPL-3.0
+-> lang        => h#
+
+[layout]
+-> src => src
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
+
+! Silver comes from vendor/silver: stock Silver + a small patch (periodic on_tick, click id),
+! see ../vendor/silver-hsnap.patch. Build its native SDL2 shims first: vendor/silver/native/README.md
+[dependencies]
+-> silver => path ../vendor/silver
