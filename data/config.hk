@@ -1,0 +1,48 @@
+[general]
+-> enabled                => true
+-> fstype                 => auto
+-> source                 => /
+-> store                  => /.snapshots
+-> store_subvol           => 
+-> qgroups                => true
+-> excludes               => 
+
+[triggers]
+-> snapshot_on_boot       => true
+-> timeline               => true
+-> timeline_minutes       => 60
+-> apt_hooks              => true
+
+! Every keep_* / max_* key: 0 = unlimited (off). max_usage_percent needs qgroups on btrfs.
+[retention]
+-> cleanup_on_boot        => true
+-> keep_boot              => 5
+-> keep_timeline          => 10
+-> keep_prepost           => 10
+-> keep_manual            => 0
+-> max_age_days           => 30
+-> keep_min               => 3
+-> max_usage_percent      => 20
+-> min_free_percent       => 10
+-> emergency_cleanup      => true
+-> keep_rollback_roots    => 3
+-> rollback_root_days     => 14
+
+! Only used by the root config: boot-menu entries to restore a snapshot.
+[grub]
+-> grub                   => true
+-> grub_max               => 10
+
+! notify_level: off | errors | all. Only used by the root config.
+[notify]
+-> notify_level           => errors
+-> log_file               => /var/log/hackeros-snapshots.log
+
+! target: /mnt/backup/hsnap  or  root@host:/backups/hsnap   (btrfs send/receive or rsync)
+[offsite]
+-> offsite                => false
+-> offsite_target         => 
+-> offsite_ssh_opts       => 
+-> offsite_types          => manual,boot
+-> offsite_keep           => 10
+-> offsite_after_create   => true
