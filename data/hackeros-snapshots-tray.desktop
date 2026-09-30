@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=HackerOS Snapshots tray
+Comment=Snapshot status icon in the notification area
+Exec=hackeros-snapshots tray
+Icon=drive-harddisk
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+OnlyShowIn=GNOME;KDE;XFCE;LXQt;MATE;Cinnamon;Budgie;X-Cinnamon;
