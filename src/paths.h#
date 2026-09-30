@@ -1,0 +1,51 @@
+mod util
+mod config
+
+pub fn src_slash(c: config::Config) -> string is
+    let s: string = config::s(c, "source")
+    if string_ends_with(s, "/") is return s end
+    return s + "/"
+end
+
+;; Paths inside the source that must not be part of a snapshot ("/var/log", …).
+pub fn exclude_list(c: config::Config) -> [string] is
+    let raw: [string] = util::csv(config::s(c, "excludes"))
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(raw) is
+        let p: string = raw[i]
+        if !string_starts_with(p, "/") is out = array_push(out, "/" + p) else is out = array_push(out, p) end
+        i += 1
+    end
+    return out
+end
+
+;; rsync --exclude flags: pseudo filesystems, the store itself, user excludes.
+pub fn rsync_excludes(c: config::Config) -> string is
+    let src: string = config::s(c, "source")
+    let store: string = config::s(c, "store")
+    let mut ex: string = ""
+    if src == "/" is
+        ex = ex + "--exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' "
+        ex = ex + "--exclude='/tmp/*' --exclude='/var/tmp/*' --exclude='/mnt/*' --exclude='/media/*' "
+        ex = ex + "--exclude='/lost+found' --exclude='/var/cache/apt/archives/*.deb' "
+        ex = ex + "--exclude=" + util::sq(store) + " "
+    else if string_starts_with(store, src + "/") is
+        ex = ex + "--exclude=" + util::sq(string_slice(store, string_len(src), string_len(store))) + " "
+    end
+    let list: [string] = exclude_list(c)
+    let mut i: int = 0
+    while i < array_len(list) is
+        ex = ex + "--exclude=" + util::sq(list[i]) + " "
+        i += 1
+    end
+    return ex
+end
+
+;; A path given by a user (GUI/CLI) must stay inside the snapshot.
+pub fn safe_rel(p: string) -> bool is
+    if !string_starts_with(p, "/") is return false end
+    if string_contains(p, "/../") || string_ends_with(p, "/..") is return false end
+    if string_contains(p, "\n") is return false end
+    return true
+end
