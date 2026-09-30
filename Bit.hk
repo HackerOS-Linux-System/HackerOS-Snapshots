@@ -1,1 +1,37 @@
+[package]
+-> name        => hackeros-snapshots
+-> version     => 0.2.0
+-> description => Filesystem snapshots for HackerOS (btrfs / ext4), inspired by snapper — multi-config, diff/restore, offsite, tray, GUI
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
+-> license     => GPL-3.0
+-> lang        => h#
 
+[layout]
+-> src => src
+
+[build]
+-> link => static
+
+! a bare `bit` in this repo builds the release binary  cache/build/release/hackeros-snapshots
+[default-build]
+-> profile => release
+
+[commands]
+-> check
+--> run => h# check src/main.h#
+--> description => Type-check every module of the CLI / daemon
+-> test
+--> run => sh tests/run.sh
+--> description => Run the shell/awk tests (diff parsers, restore) — no H# toolchain needed
+-> gui
+--> run => cd gui && bit
+--> description => Build the Silver GUI (needs the native Silver shims, see gui/README.md)
+-> install
+--> run => sudo ./packaging/install.sh
+--> description => Install binary, systemd unit, GRUB hook, apt hook (and GUI if built)
+-> uninstall
+--> run => sudo ./packaging/uninstall.sh
+--> description => Remove everything except snapshots and config
+
+[hooks]
+-> pre-build => echo "building hackeros-snapshots (static)"
