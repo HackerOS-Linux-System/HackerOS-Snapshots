@@ -1,0 +1,74 @@
+extern static [c] is
+    fn system(cmd: string) -> int
+end
+
+pub struct Job is
+    pub jb_label: string
+    pub jb_rc:    int
+    pub jb_out:   string   ;; output with colour codes removed
+end
+
+fn sq(s: string) -> string is
+    return "'" + string_replace(s, "'", "'\\''") + "'"
+end
+
+pub fn dir() -> string is
+    return "/tmp/hsnap-gui-" + string_trim(shell("id -u"))
+end
+
+pub fn path(name: string) -> string is
+    return dir() + "/" + name
+end
+
+pub fn prepare() is
+    system("mkdir -p " + sq(dir()) + " && chmod 700 " + sq(dir()))
+end
+
+pub fn running() -> bool is
+    return file_exists(path("label")) && !file_exists(path("rc"))
+end
+
+pub fn finished() -> bool is
+    return file_exists(path("label")) && file_exists(path("rc"))
+end
+
+pub fn label() -> string is
+    return string_trim(shell("cat " + sq(path("label")) + " 2>/dev/null"))
+end
+
+;; false when another job is still running
+pub fn start(label_text: string, cmd: string, out_name: string) -> bool is
+    if running() is return false end
+    prepare()
+    system("rm -f " + sq(path("rc")) + " " + sq(path(out_name)))
+    file_write(path("label"), label_text)
+    let inner: string = "sh -c " + sq(cmd) + " > " + sq(path(out_name)) + " 2>&1; echo $? > " + sq(path("rc.tmp")) + "; mv -f " + sq(path("rc.tmp")) + " " + sq(path("rc"))
+    system("( " + inner + " ) >/dev/null 2>&1 &")
+    return true
+end
+
+pub fn clean(out_name: string) -> string is
+    return shell("sed -r 's/\\x1b\\[[0-9;]*m//g' " + sq(path(out_name)) + " 2>/dev/null")
+end
+
+pub fn take(out_name: string) -> Job is
+    let lbl: string = label()
+    let raw: string = string_trim(shell("cat " + sq(path("rc")) + " 2>/dev/null"))
+    let mut code: int = 1
+    if string_len(raw) > 0 && string_len(raw) < 6 is code = to_int(raw) end
+    let out: string = clean(out_name)
+    system("rm -f " + sq(path("label")) + " " + sq(path("rc")))
+    return Job { jb_label: lbl, jb_rc: code, jb_out: out }
+end
+
+;; last non-empty line of a text
+pub fn last_line(text: string) -> string is
+    let lines: [string] = string_split(text, "\n")
+    let mut i: int = array_len(lines) - 1
+    while i >= 0 is
+        let t: string = string_trim(lines[i])
+        if t != "" is return t end
+        i -= 1
+    end
+    return ""
+end
