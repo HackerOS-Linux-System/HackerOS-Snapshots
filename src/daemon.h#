@@ -1,0 +1,120 @@
+mod util
+mod ui
+mod config
+mod fsinfo
+mod store
+mod snap
+mod usage
+mod manager
+mod retention
+mod grub
+mod offsite
+mod notify
+
+fn boot_marker() -> string is
+    return "/run/hackeros-snapshots.booted"
+end
+
+;; after a snapshot: copy offsite when configured
+fn maybe_offsite(c: config::Config, stype: string) -> bool is
+    if !offsite::enabled(c) || !config::b(c, "offsite_after_create") is return true end
+    if !util::has_str(util::csv(config::s(c, "offsite_types")), stype) is return true end
+    return offsite::sync(c) >= 0
+end
+
+pub fn boot_tasks() is
+    let names: [string] = config::names()
+    let mut root_changed: bool = false
+    let mut failed: bool = false
+    let mut i: int = 0
+    while i < array_len(names) is
+        let c: config::Config = config::load_named(names[i])
+        i += 1
+        if !config::b(c, "enabled") || !config::valid(c) is continue end
+        let mut changed: bool = false
+
+        if config::b(c, "snapshot_on_boot") is
+            let id: int = manager::take(c, "boot", "System boot " + util::fmt_epoch(util::now_epoch()), 0, true)
+            if id > 0 is changed = true end
+            if id == -1 is failed = true end
+        end
+
+        ;; the point of the whole tool: old snapshots are removed on every start
+        if config::b(c, "cleanup_on_boot") is
+            let removed: int = retention::cleanup(c, false, true)
+            if removed > 0 is changed = true end
+            notify::info("boot cleanup of config " + c.cf_name + " removed " + to_string(removed) + " item(s)")
+        end
+
+        if !maybe_offsite(c, "boot") is failed = true end
+        if changed && fsinfo::is_root_config(c) is root_changed = true end
+    end
+
+    let root: config::Config = config::load()
+    if root_changed && config::b(root, "grub") is
+        if grub::update(root) == 0 is
+            notify::info("GRUB menu updated")
+        else is
+            notify::warn("GRUB update failed")
+        end
+    end
+    if failed is
+        notify::set_health("error", "a boot task failed — see the log")
+    else is
+        notify::set_health("ok", "boot tasks done")
+    end
+end
+
+fn timeline_due(c: config::Config) -> bool is
+    let last: int = store::latest_id(c, "timeline")
+    if last == 0 is return true end
+    let s: store::Snap = store::read(c, last)
+    return util::now_epoch() - s.sn_epoch >= config::n(c, "timeline_minutes") * 60
+end
+
+;; one pass over all configs; returns "ok" | "warn" | "error"
+fn pass() -> string is
+    let names: [string] = config::names()
+    let mut state: string = "ok"
+    let mut why: string = "running"
+    let mut i: int = 0
+    while i < array_len(names) is
+        let c: config::Config = config::load_named(names[i])
+        i += 1
+        if !config::b(c, "enabled") || !config::valid(c) || !dir_exists(config::s(c, "store")) is continue end
+
+        if config::b(c, "timeline") && timeline_due(c) is
+            let id: int = manager::take(c, "timeline", "Timeline " + util::fmt_epoch(util::now_epoch()), 0, true)
+            if id > 0 is
+                retention::cleanup(c, false, false)
+                if !maybe_offsite(c, "timeline") is
+                    state = "error"
+                    why = "offsite copy failed (config " + c.cf_name + ")"
+                end
+                if fsinfo::is_root_config(c) is grub::update(c) end
+            else if id == -1 is
+                state = "error"
+                why = "snapshot failed (config " + c.cf_name + ")"
+            end
+        end
+
+        let need: int = config::n(c, "min_free_percent")
+        if state == "ok" && need > 0 && usage::free_percent(c) < need + 5 is
+            state = "warn"
+            why = "disk almost full (config " + c.cf_name + ")"
+        end
+    end
+    notify::set_health(state, why)
+    return state
+end
+
+pub fn run() is
+    if !file_exists(boot_marker()) is
+        util::write_file(boot_marker(), "1")
+        boot_tasks()
+    end
+    while true is
+        pass()
+        util::run("sleep 60")
+    end
+end
