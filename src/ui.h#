@@ -1,0 +1,29 @@
+fn color_on() -> bool is
+    return env_get("NO_COLOR") == ""
+end
+
+fn paint(code: string, s: string) -> string is
+    if !color_on() is return s end
+    return "\x1b[" + code + "m" + s + "\x1b[0m"
+end
+
+pub fn bold(s: string)   -> string is return paint("1", s)  end
+pub fn dim(s: string)    -> string is return paint("2", s)  end
+pub fn red(s: string)    -> string is return paint("31", s) end
+pub fn green(s: string)  -> string is return paint("32", s) end
+pub fn yellow(s: string) -> string is return paint("33", s) end
+pub fn cyan(s: string)   -> string is return paint("36", s) end
+
+pub fn ok(msg: string)   is write("  " + green("✓") + "  " + msg) end
+pub fn bad(msg: string)  is write("  " + red("✗") + "  " + msg) end
+pub fn fail(msg: string) is write("  " + red("error:") + " " + msg) end
+pub fn warn(msg: string) is write("  " + yellow("warning:") + " " + msg) end
+pub fn note(msg: string) is write("  " + dim(msg)) end
+pub fn line(msg: string) is write("  " + msg) end
+pub fn blank()           is write("") end
+
+pub fn heading(msg: string) is
+    write("")
+    write("  " + bold(msg))
+    write("  " + dim(string_repeat("─", 60)))
+end
