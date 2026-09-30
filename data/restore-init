@@ -1,0 +1,50 @@
+#!/bin/sh
+# HackerOS Snapshots — restore-init
+#
+# Used as  init=/usr/lib/hackeros-snapshots/restore-init  by the GRUB entries
+# "HackerOS Snapshots → Restore: snapshot #N". Runs as PID 1 in place of systemd,
+# restores the snapshot given by  hsnap.restore=<id>  on the kernel command line,
+# then hands over to the real init (ext4) or reboots (btrfs, root subvolume swap).
+#
+# If anything fails the system is left untouched and boots normally.
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+mount -t proc  proc  /proc 2>/dev/null
+mount -t sysfs sysfs /sys  2>/dev/null
+mountpoint -q /dev || mount -t devtmpfs dev /dev 2>/dev/null
+mountpoint -q /run || mount -t tmpfs tmpfs /run 2>/dev/null
+mount -o remount,rw / 2>/dev/null
+
+ID=$(sed -n 's/.*hsnap\.restore=\([0-9][0-9]*\).*/\1/p' /proc/cmdline)
+FS=$(findmnt -no FSTYPE / 2>/dev/null | head -1)
+
+boot_normally() {
+    echo "restore-init: booting the current system"
+    if [ -x /lib/systemd/systemd ]; then exec /lib/systemd/systemd "$@"; fi
+    if [ -x /usr/lib/systemd/systemd ]; then exec /usr/lib/systemd/systemd "$@"; fi
+    exec /sbin/init "$@"
+}
+
+if [ -z "$ID" ]; then
+    echo "restore-init: no hsnap.restore=<id> on the command line"
+    boot_normally "$@"
+fi
+
+echo "=============================================="
+echo " HackerOS Snapshots: restoring snapshot #$ID"
+echo "=============================================="
+
+if /usr/bin/hackeros-snapshots rollback "$ID" --offline --yes; then
+    sync
+    if [ "$FS" = "btrfs" ]; then
+        echo "restore-init: root subvolume replaced — rebooting"
+        umount -a -r 2>/dev/null
+        exec /sbin/reboot -f
+    fi
+    boot_normally "$@"
+else
+    echo "restore-init: restore FAILED — system left unchanged"
+    sleep 5
+    boot_normally "$@"
+fi
