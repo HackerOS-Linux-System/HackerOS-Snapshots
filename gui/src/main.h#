@@ -1,0 +1,416 @@
+use "bit -> silver"    from "app"
+use "bit -> silver" from "dialog"
+mod backend
+mod jobs
+mod views
+
+fn noop(args: string) -> string is
+    return "{}"
+end
+
+fn st(a: app::App, k: string) -> string is
+    return app::state(a, k)
+end
+
+fn put(a: app::App, k: string, v: string) -> app::App is
+    return app::set_state(a, k, v)
+end
+
+fn need(a: app::App) -> app::App is
+    return put(a, "need_render", "1")
+end
+
+fn say(a: app::App, msg: string) -> app::App is
+    return put(a, "status", msg)
+end
+
+fn goto(a: app::App, view: string) -> app::App is
+    let s: app::App = put(a, "view", view)
+    return need(app::scroll_to(s, 0))
+end
+
+fn cfg_of(a: app::App) -> string is
+    return st(a, "cfg")
+end
+
+;; text typed by the user, or the value that was shown in the field
+fn typed(a: app::App, id: string, fallback: string) -> string is
+    let v: string = string_trim(app::input_value(a, id))
+    if v == "" is return fallback end
+    return v
+end
+
+fn is_num(s: string) -> bool is
+    return backend::to_int_or(s, -1) >= 0
+end
+
+;; ── jobs ─────────────────────────────────────────────────────────────────────
+
+fn start_job(a: app::App, kind: string, label: string, cmd: string, out_name: string) -> app::App is
+    if !jobs::start(label, cmd, out_name) is
+        return say(a, "Busy: " + jobs::label() + " — wait until it finishes")
+    end
+    let s: app::App = put(put(a, "job_kind", kind), "job_out", out_name)
+    return say(s, label + " …")
+end
+
+fn start_priv(a: app::App, kind: string, label: string, args: string, out_name: string) -> app::App is
+    return start_job(a, kind, label, backend::priv_cmd(args), out_name)
+end
+
+fn spinner(n: int) -> string is
+    let r: int = n % 4
+    if r == 0 is return "|" end
+    if r == 1 is return "/" end
+    if r == 2 is return "-" end
+    return "\\"
+end
+
+fn finish(a: app::App) -> app::App is
+    let out_name: string = st(a, "job_out")
+    let j: jobs::Job = jobs::take(if out_name == "" then "job.out" else out_name)
+    let kind: string = st(a, "job_kind")
+    let last: string = jobs::last_line(j.jb_out)
+    let clip: int = if string_len(j.jb_out) > 3000 then 3000 else string_len(j.jb_out)
+    let mut s: app::App = put(a, "lastout", string_slice(j.jb_out, 0, clip))
+    if j.jb_rc == 0 is
+        s = say(s, "✓ " + j.jb_label + (if last != "" && kind != "diff" then " — " + last else ""))
+    else is
+        s = say(s, "✗ " + j.jb_label + " failed" + (if last != "" then ": " + last else ""))
+    end
+    if kind == "diff" is s = put(s, "diff_done", "1") end
+    if kind == "cfgdel" && j.jb_rc == 0 is s = put(s, "cfg", "root") end
+    return need(s)
+end
+
+;; ── actions ──────────────────────────────────────────────────────────────────
+
+fn apply_settings(a: app::App, pairs: [string], label: string) -> app::App is
+    if array_len(pairs) == 0 is return say(a, "Nothing to change") end
+    let mut args: string = "-c " + backend::sq(cfg_of(a)) + " config apply"
+    let mut i: int = 0
+    while i < array_len(pairs) is
+        args = args + " " + backend::sq(pairs[i])
+        i += 1
+    end
+    return start_priv(app::clear_inputs(a), "cfg", label, args, "job.out")
+end
+
+fn collect(a: app::App, keys: [string], numeric: bool) -> [string] is
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(keys) is
+        let key: string = keys[i]
+        let v: string = string_trim(app::input_value(a, "in_" + key))
+        i += 1
+        if v == "" is continue end
+        if numeric && !is_num(v) is
+            out = array_push(out, "!" + key)
+        else if !numeric && v == "-" is
+            out = array_push(out, key + "=")
+        else is
+            out = array_push(out, key + "=" + v)
+        end
+    end
+    return out
+end
+
+fn save_settings(a: app::App, keys: [string], numeric: bool, label: string) -> app::App is
+    let pairs: [string] = collect(a, keys, numeric)
+    let mut good: [string] = []
+    let mut i: int = 0
+    while i < array_len(pairs) is
+        if string_starts_with(pairs[i], "!") is
+            return say(a, "'" + string_slice(pairs[i], 1, string_len(pairs[i])) + "' must be a whole number")
+        end
+        good = array_push(good, pairs[i])
+        i += 1
+    end
+    return apply_settings(a, good, label)
+end
+
+fn run_diff(a: app::App, da: string, db: string) -> app::App is
+    if backend::to_int_or(da, 0) <= 0 is return say(a, "Enter the number of the first snapshot") end
+    let mut s: app::App = put(put(put(a, "da", da), "db", db), "dpath", "")
+    s = put(s, "diff_done", "0")
+    let args: string = "-c " + backend::sq(cfg_of(a)) + " diff " + da + " " + (if backend::to_int_or(db, 0) > 0 then db else "current") + " --porcelain"
+    return goto(start_priv(s, "diff", "Comparing #" + da + " with " + (if backend::to_int_or(db, 0) > 0 then "#" + db else "the system"), args, "diff.out"), "diff")
+end
+
+fn restore_path(a: app::App, id: string, path: string) -> app::App is
+    if path == "" || path == "/" is return say(a, "Pick a file or folder first (the whole system: use \"Restore whole system\")") end
+    if !dialog::confirm("Restore from snapshot #" + id, "Replace " + path + " with the version from snapshot #" + id + "?\nThe current version is kept in /var/lib/hackeros-snapshots/restore-backups/.") is
+        return say(a, "Cancelled")
+    end
+    return start_priv(a, "restore", "Restoring " + path, "-c " + backend::sq(cfg_of(a)) + " restore " + id + " " + backend::sq(path) + " --yes", "job.out")
+end
+
+fn parent_path(p: string) -> string is
+    if p == "/" || p == "" is return "/" end
+    let mut cut: int = 0
+    let mut i: int = 0
+    while i < string_len(p) is
+        if string_at(p, i) == "/" is cut = i end
+        i += 1
+    end
+    if cut == 0 is return "/" end
+    return string_slice(p, 0, cut)
+end
+
+fn join_path(base: string, name: string) -> string is
+    if base == "/" is return "/" + name end
+    return base + "/" + name
+end
+
+fn previous_id(rows: [string], id: string) -> string is
+    let mut prev: string = ""
+    let mut i: int = 0
+    while i < array_len(rows) is
+        let cur: string = backend::field(rows[i], 0)
+        if cur == id is return prev end
+        prev = cur
+        i += 1
+    end
+    return ""
+end
+
+fn click_snapshot_actions(a: app::App, id: string) -> app::App is
+    let cfg: string = cfg_of(a)
+    let sel: string = st(a, "sel")
+    let rows: [string] = backend::snap_rows(cfg)
+    let cur: string = backend::row_of(rows, sel)
+    let needs_sel: bool = id == "act_cmp_live" || id == "act_cmp_prev" || id == "act_browse" || id == "act_pin" || id == "act_rollback" || id == "act_delete"
+    if needs_sel && cur == "" is return say(a, "Select a snapshot first (click it in the list)") end
+
+    if id == "act_create" is
+        let d: string = typed(a, "in_desc", "Manual snapshot (GUI)")
+        return start_priv(app::clear_inputs(a), "create", "Creating snapshot", "-c " + backend::sq(cfg) + " create -d " + backend::sq(d), "job.out")
+    end
+    if id == "act_cleanup" is return start_priv(a, "cleanup", "Cleaning up old snapshots", "-c " + backend::sq(cfg) + " cleanup", "job.out") end
+    if id == "act_refresh" is return need(say(a, "Refreshed")) end
+    if id == "act_more" is return need(put(a, "limit", to_string(backend::to_int_or(st(a, "limit"), 100) + 100))) end
+    if id == "act_cmp_live" is return run_diff(a, sel, "") end
+    if id == "act_cmp_prev" is
+        let prev: string = previous_id(rows, sel)
+        if prev == "" is return say(a, "There is no older snapshot to compare with") end
+        return run_diff(a, prev, sel)
+    end
+    if id == "act_browse" is return goto(put(put(put(a, "bid", sel), "bpath", "/"), "bsel", ""), "browse") end
+    if id == "act_pin" is
+        let pinned: bool = backend::field(cur, 4) == "*"
+        return start_priv(a, "pin", if pinned then "Unpinning #" + sel else "Pinning #" + sel, "-c " + backend::sq(cfg) + (if pinned then " unpin " else " pin ") + sel, "job.out")
+    end
+    if id == "act_rollback" is
+        if !dialog::confirm("Restore the whole system", "Restore '" + cfg + "' to snapshot #" + sel + "?\nA safety snapshot is taken first. Reboot afterwards to finish.") is return say(a, "Cancelled") end
+        return start_priv(a, "rollback", "Restoring snapshot #" + sel, "-c " + backend::sq(cfg) + " rollback " + sel + " --yes", "job.out")
+    end
+    if id == "act_delete" is
+        if !dialog::confirm("Delete snapshot", "Delete snapshot #" + sel + " permanently?") is return say(a, "Cancelled") end
+        return start_priv(put(a, "sel", ""), "delete", "Deleting #" + sel, "-c " + backend::sq(cfg) + " delete " + sel, "job.out")
+    end
+    return a
+end
+
+fn click_other_actions(a: app::App, id: string) -> app::App is
+    let cfg: string = cfg_of(a)
+    if id == "act_diff_run" is
+        let dbt: string = string_trim(app::input_value(a, "in_db"))
+        return run_diff(a, typed(a, "in_da", st(a, "da")), if dbt != "" then dbt else st(a, "db"))
+    end
+    if id == "act_dres_a" is return restore_path(a, st(a, "da"), st(a, "dpath")) end
+    if id == "act_dres_b" is return restore_path(a, st(a, "db"), st(a, "dpath")) end
+    if id == "act_bgo" is return need(put(put(put(a, "bid", typed(a, "in_bid", st(a, "bid"))), "bpath", "/"), "bsel", "")) end
+    if id == "act_bup" is return need(put(put(a, "bpath", parent_path(st(a, "bpath"))), "bsel", "")) end
+    if id == "act_bres" is
+        let bsel: string = st(a, "bsel")
+        return restore_path(a, st(a, "bid"), if bsel != "" then join_path(st(a, "bpath"), bsel) else st(a, "bpath"))
+    end
+    if id == "act_save" is
+        let keys: [string] = ["timeline_minutes", "keep_boot", "keep_timeline", "keep_prepost", "keep_manual", "max_age_days", "keep_min", "max_usage_percent", "min_free_percent", "keep_rollback_roots", "rollback_root_days", "grub_max"]
+        let s: app::App = save_settings(a, keys, true, "Saving settings")
+        if st(s, "status") == "Nothing to change" is
+            return save_settings(a, ["excludes"], false, "Saving settings")
+        end
+        return s
+    end
+    if id == "act_off_save" is
+        let cl: [string] = backend::cfg_lines(cfg)
+        let keys: [string] = ["offsite_target", "offsite_ssh_opts", "offsite_types", "offsite_keep"]
+        let mut pairs: [string] = []
+        let mut k: int = 0
+        while k < array_len(keys) is
+            let v: string = string_trim(app::input_value(a, "in_" + keys[k]))
+            if v == "-" is
+                pairs = array_push(pairs, keys[k] + "=")
+            else if v != "" is
+                pairs = array_push(pairs, keys[k] + "=" + v)
+            end
+            k += 1
+        end
+        return apply_settings(a, pairs, "Saving offsite settings")
+    end
+    if id == "act_off_test" is return start_priv(a, "off", "Testing the offsite target", "-c " + backend::sq(cfg) + " offsite test", "job.out") end
+    if id == "act_off_run" is return start_priv(a, "off", "Copying snapshots offsite", "-c " + backend::sq(cfg) + " offsite run", "job.out") end
+    if id == "act_off_prune" is return start_priv(a, "off", "Pruning the offsite target", "-c " + backend::sq(cfg) + " offsite prune", "job.out") end
+    if id == "act_roots_prune" is return start_priv(a, "roots", "Deleting old rollback roots", "-c root roots prune", "job.out") end
+    if id == "act_cfg_create" is
+        let name: string = string_trim(app::input_value(a, "in_newname"))
+        let src: string = typed(a, "in_newsrc", "/home")
+        if name == "" is return say(a, "Give the new config a name (a-z 0-9 _ -)") end
+        return start_priv(app::clear_inputs(a), "cfgnew", "Creating config " + name, "config create " + backend::sq(name) + " --source " + backend::sq(src), "job.out")
+    end
+    if id == "act_cfg_delete" is
+        if cfg == "root" is return say(a, "The root config cannot be deleted") end
+        if !dialog::confirm("Delete config", "Remove config '" + cfg + "'? Its snapshots are not deleted.") is return say(a, "Cancelled") end
+        return start_priv(a, "cfgdel", "Removing config " + cfg, "config delete " + backend::sq(cfg), "job.out")
+    end
+    if id == "wz_next" is return goto(put(a, "wstep", "2"), "wizard") end
+    if id == "wz_back" is return goto(put(a, "wstep", "1"), "wizard") end
+    if id == "wz_again" is return goto(put(a, "wstep", "1"), "wizard") end
+    if id == "wz_apply" is
+        let fs: string = st(a, "wfs")
+        let flag: string = if fs == "btrfs" || fs == "ext4" then " --fs " + fs else ""
+        return goto(start_priv(put(a, "wstep", "3"), "init", "Setting up '" + cfg + "'", "-c " + backend::sq(cfg) + " init --yes" + flag, "job.out"), "wizard")
+    end
+    if id == "wz_service" is
+        return start_job(a, "service", "Starting the background service", (if backend::is_root() then "" else "pkexec ") + "systemctl enable --now hackeros-snapshots.service", "job.out")
+    end
+    return a
+end
+
+fn util_has(items: [string], needle: string) -> bool is
+    let mut i: int = 0
+    while i < array_len(items) is
+        if items[i] == needle is return true end
+        i += 1
+    end
+    return false
+end
+
+fn toggle_keys() -> [string] is
+    return ["enabled", "snapshot_on_boot", "timeline", "apt_hooks", "cleanup_on_boot", "emergency_cleanup", "grub", "offsite", "offsite_after_create", "qgroups"]
+end
+
+fn handle(a: app::App, id: string) -> app::App is
+    if string_starts_with(id, "nav_") is return goto(a, string_slice(id, 4, string_len(id))) end
+    if string_starts_with(id, "cfg_") is
+        let mut s: app::App = put(a, "cfg", string_slice(id, 4, string_len(id)))
+        s = put(put(put(put(s, "sel", ""), "dpath", ""), "bsel", ""), "diff_done", "0")
+        return need(app::clear_inputs(s))
+    end
+    if string_starts_with(id, "sel_") is return need(put(a, "sel", string_slice(id, 4, string_len(id)))) end
+    if string_starts_with(id, "df_") is
+        let lines: [string] = views::diff_lines()
+        let i: int = backend::to_int_or(string_slice(id, 3, string_len(id)), -1)
+        if i >= 0 && i < array_len(lines) is
+            return need(put(a, "dpath", string_slice(lines[i], 2, string_len(lines[i]))))
+        end
+        return a
+    end
+    if string_starts_with(id, "bd_") is
+        let idx: int = backend::to_int_or(string_slice(id, 3, string_len(id)), -1)
+        let lines: [string] = backend::cli_lines("-c " + backend::sq(cfg_of(a)) + " browse " + backend::sq(st(a, "bid")) + " " + backend::sq(st(a, "bpath")) + " --porcelain")
+        if idx >= 0 && idx < array_len(lines) is
+            let f: [string] = string_split(lines[idx], "\t")
+            if array_len(f) >= 3 is
+                if f[0] == "d" is
+                    return need(put(put(a, "bpath", join_path(st(a, "bpath"), f[2])), "bsel", ""))
+                end
+                return need(put(a, "bsel", f[2]))
+            end
+        end
+        return a
+    end
+    if string_starts_with(id, "wf_") is return need(put(a, "wfs", string_slice(id, 3, string_len(id)))) end
+    if string_starts_with(id, "nl_") is
+        return start_priv(a, "cfg", "Notifications: " + string_slice(id, 3, string_len(id)), "-c root config apply notify_level=" + string_slice(id, 3, string_len(id)), "job.out")
+    end
+    if string_starts_with(id, "tg_") is
+        let key: string = string_slice(id, 3, string_len(id))
+        if !util_has(toggle_keys(), key) is return a end
+        let cur: string = backend::cfg_get(backend::cfg_lines(cfg_of(a)), key)
+        return apply_settings(a, [key + "=" + (if cur == "true" then "false" else "true")], key + " " + (if cur == "true" then "off" else "on"))
+    end
+    if id == "act_create" || id == "act_cleanup" || id == "act_refresh" || id == "act_more" || id == "act_cmp_live" || id == "act_cmp_prev" || id == "act_browse" || id == "act_pin" || id == "act_rollback" || id == "act_delete" is
+        return click_snapshot_actions(a, id)
+    end
+    return click_other_actions(a, id)
+end
+
+;; ── render / tick ────────────────────────────────────────────────────────────
+
+fn render(a: app::App) -> app::App is
+    let view: string = st(a, "view")
+    let mut body: string = ""
+    if view == "diff" is
+        body = views::diff(a)
+    else if view == "browse" is
+        body = views::browse(a)
+    else if view == "settings" is
+        body = views::settings(a)
+    else if view == "offsite" is
+        body = views::offsite(a)
+    else if view == "wizard" is
+        body = views::wizard(a)
+    else is
+        body = views::snapshots(a)
+    end
+    return put(app::load_html_str(a, views::page(a, body)), "need_render", "0")
+end
+
+fn tick(a: app::App) -> app::App is
+    let mut s: app::App = a
+    if jobs::finished() is
+        s = finish(s)
+    else if jobs::running() is
+        let n: int = backend::to_int_or(st(s, "ticks"), 0) + 1
+        s = put(s, "ticks", to_string(n))
+        s = say(s, jobs::label() + " … " + spinner(n))
+    end
+    let id: string = st(s, "_click")
+    if id != "" is
+        s = put(s, "_click", "")
+        s = handle(s, id)
+    end
+    if st(s, "need_render") == "1" is s = render(s) end
+    return s
+end
+
+;; ── startup ──────────────────────────────────────────────────────────────────
+
+fn gui_dir() -> string is
+    if dir_exists("frontend") is return "frontend" end
+    return "/usr/share/hackeros-snapshots/gui/frontend"
+end
+
+fn font_path() -> string is
+    let cands: [string] = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                           "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+                           "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                           gui_dir() + "/fonts/DejaVuSans.ttf"]
+    let mut i: int = 0
+    while i < array_len(cands) is
+        if file_exists(cands[i]) is return cands[i] end
+        i += 1
+    end
+    return cands[3]
+end
+
+fn main() is
+    jobs::prepare()
+    let mut a: app::App = app::new("HackerOS Snapshots", 1000, 780)
+    a = app::with_font(a, font_path(), 15)
+    a = app::load_css(a, gui_dir() + "/style.css")
+    a = app::command(a, "act", noop)
+    a = app::on_tick(a, tick)
+    a = app::tick_every(a, 12)
+
+    let first_run: bool = !dir_exists(backend::cli("config get store"))
+    a = put(a, "cfg", "root")
+    a = put(a, "view", if first_run then "wizard" else "snaps")
+    a = put(a, "wstep", "1")
+    a = put(a, "limit", "100")
+    a = put(a, "status", if first_run then "Welcome — the setup wizard prepares the snapshot store." else "Ready")
+    a = put(a, "need_render", "1")
+    app::run(a)
+end
