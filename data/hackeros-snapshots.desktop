@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=HackerOS Snapshots
+Comment=Create, delete and restore system snapshots
+Exec=hackeros-snapshots-gui
+Icon=drive-harddisk
+Terminal=false
+Categories=System;Settings;
