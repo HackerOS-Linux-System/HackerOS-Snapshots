@@ -15,7 +15,5 @@
 [default-build]
 -> profile => release
 
-! Silver comes from vendor/silver: stock Silver + a small patch (periodic on_tick, click id),
-! see ../vendor/silver-hsnap.patch. Build its native SDL2 shims first: vendor/silver/native/README.md
 [dependencies]
--> silver => path ../vendor/silver
+-> silver => newest
