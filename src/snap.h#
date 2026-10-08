@@ -1,0 +1,269 @@
+mod util
+mod ui
+mod config
+mod fsinfo
+mod store
+mod paths
+mod notify
+
+fn rsync_ok(rc: int) -> bool is
+    ;; 24 = "some source files vanished while copying" — normal on a live system
+    return rc == 0 || rc == 24 || rc == 6144
+end
+
+pub fn reboot_marker() -> string is
+    return "/run/hackeros-snapshots.reboot-needed"
+end
+
+;; true after an online btrfs rollback, until the machine has been rebooted
+pub fn reboot_pending() -> bool is
+    return file_exists(reboot_marker()) || string_contains(fsinfo::root_subvol(), ".before-rollback-")
+end
+
+;; ── create ───────────────────────────────────────────────────────────────────
+
+fn create_btrfs(c: config::Config, dst: string) -> int is
+    let src: string = config::s(c, "source")
+    if !fsinfo::is_subvolume(src) is
+        ui::fail(src + " is not a btrfs subvolume — snapshots need the root of a subvolume")
+        return 1
+    end
+    let ex: [string] = paths::exclude_list(c)
+    if array_len(ex) == 0 is
+        return util::run("btrfs subvolume snapshot -r " + util::sq(src) + " " + util::sq(dst) + " >/dev/null")
+    end
+    ;; writable snapshot → cut the excluded paths → read-only
+    let rc: int = util::run("btrfs subvolume snapshot " + util::sq(src) + " " + util::sq(dst) + " >/dev/null")
+    if rc != 0 is return rc end
+    let mut i: int = 0
+    while i < array_len(ex) is
+        util::run("rm -rf --one-file-system -- " + util::sq(dst + ex[i]))
+        i += 1
+    end
+    return util::run("btrfs property set -ts " + util::sq(dst) + " ro true >/dev/null")
+end
+
+;; Returns the new id, or -1 on failure.
+pub fn create_raw(c: config::Config, stype: string, desc: string, pre: int) -> int is
+    let fs: string = fsinfo::effective(c)
+    if !fsinfo::supported(fs) is
+        ui::fail("filesystem '" + fs + "' is not supported (btrfs and ext4 only)")
+        return -1
+    end
+    let store_dir: string = store::store_dir(c)
+    if !dir_exists(store_dir) is
+        if fs == "btrfs" is
+            ui::fail("snapshot store " + store_dir + " does not exist — run: hackeros-snapshots init -c " + c.cf_name)
+            return -1
+        end
+        util::mkdir_p(store_dir)
+    end
+    if !util::lock_acquire() is
+        ui::fail("another hackeros-snapshots operation is running")
+        return -1
+    end
+
+    let id: int = store::next_id(c)
+    let dir: string = store::dir_of(c, id)
+    let dst: string = store::snap_path(c, id)
+    let prev: int = store::latest_id(c, "")
+    util::mkdir_p(dir)
+
+    let mut rc: int = 1
+    if fs == "btrfs" is
+        rc = create_btrfs(c, dst)
+    else is
+        let link: string = if prev > 0 && dir_exists(store::snap_path(c, prev)) then "--link-dest=" + util::sq(store::snap_path(c, prev)) + " " else ""
+        util::mkdir_p(dst)
+        let r: int = util::run("rsync -aHAXx --numeric-ids --delete " + link + paths::rsync_excludes(c) + util::sq(paths::src_slash(c)) + " " + util::sq(dst + "/"))
+        if rsync_ok(r) is rc = 0 end
+    end
+
+    if rc != 0 is
+        ui::fail("creating snapshot #" + to_string(id) + " failed")
+        if fs == "btrfs" && dir_exists(dst) is util::run("btrfs subvolume delete " + util::sq(dst) + " >/dev/null 2>&1") end
+        util::run("rm -rf " + util::sq(dir))
+        util::lock_release()
+        return -1
+    end
+
+    let s: store::Snap = store::Snap {
+        sn_id: id, sn_type: stype, sn_desc: desc, sn_epoch: util::now_epoch(),
+        sn_pinned: false, sn_pre: pre, sn_fs: fs, sn_kver: fsinfo::running_kver()
+    }
+    store::write(c, s)
+    util::run("chmod 755 " + util::sq(store_dir) + " " + util::sq(dir))
+    util::lock_release()
+    return id
+end
+
+;; ── delete ───────────────────────────────────────────────────────────────────
+
+pub fn delete(c: config::Config, id: int, force: bool) -> bool is
+    if !store::exists(c, id) is
+        ui::fail("no snapshot #" + to_string(id))
+        return false
+    end
+    let s: store::Snap = store::read(c, id)
+    if s.sn_pinned && !force is
+        ui::fail("snapshot #" + to_string(id) + " is pinned (unpin it or use --force)")
+        return false
+    end
+    if !util::lock_acquire() is
+        ui::fail("another hackeros-snapshots operation is running")
+        return false
+    end
+    let dir: string = store::dir_of(c, id)
+    let path: string = store::snap_path(c, id)
+    let fs: string = if s.sn_fs != "" then s.sn_fs else fsinfo::effective(c)
+    let mut ok: bool = true
+    if fs == "btrfs" && dir_exists(path) is
+        ;; -c: wait for the commit, so the freed space is visible to the next df
+        if util::run("btrfs subvolume delete -c " + util::sq(path) + " >/dev/null 2>&1") != 0 is ok = false end
+    end
+    if ok is
+        ;; `info` goes first: a half-deleted snapshot must not show up in listings
+        util::run("rm -f " + util::sq(dir + "/info"))
+        util::run("rm -rf " + util::sq(dir))
+    else is
+        ui::fail("could not delete the btrfs subvolume of #" + to_string(id))
+    end
+    util::lock_release()
+    return ok
+end
+
+;; ── pin ──────────────────────────────────────────────────────────────────────
+
+pub fn set_pinned(c: config::Config, id: int, pinned: bool) -> bool is
+    if !store::exists(c, id) is
+        ui::fail("no snapshot #" + to_string(id))
+        return false
+    end
+    let mut s: store::Snap = store::read(c, id)
+    s.sn_pinned = pinned
+    store::write(c, s)
+    return true
+end
+
+;; ── rollback ─────────────────────────────────────────────────────────────────
+
+;; Puts the excluded paths of the OLD root back into the new one (they are not part of
+;; the snapshot, so without this a rollback would make them vanish). reflink = instant.
+fn carry_excludes(c: config::Config, old_root: string, new_root: string) is
+    let ex: [string] = paths::exclude_list(c)
+    let mut i: int = 0
+    while i < array_len(ex) is
+        let p: string = ex[i]
+        util::run("rm -rf -- " + util::sq(new_root + p))
+        util::mkdir_p(util::dirname_of(new_root + p))
+        util::run("cp -a --reflink=auto -- " + util::sq(old_root + p) + " " + util::sq(new_root + p) + " 2>/dev/null")
+        i += 1
+    end
+end
+
+fn rollback_btrfs_root(c: config::Config, id: int) -> int is
+    if reboot_pending() is
+        ui::fail("a rollback is already waiting for a reboot — reboot first")
+        return 1
+    end
+    let root_sub: string = fsinfo::root_subvol()
+    if root_sub == "" is
+        ui::fail("/ is the top-level btrfs volume (no subvolume such as '@') — rollback by subvolume swap is impossible")
+        return 1
+    end
+    let store_subvol: string = config::s(c, "store_subvol")
+    if store_subvol == "" is
+        ui::fail("store_subvol is not set — run: hackeros-snapshots init")
+        return 1
+    end
+    if !util::lock_acquire() is
+        ui::fail("another hackeros-snapshots operation is running")
+        return 1
+    end
+    let top: string = fsinfo::mount_top()
+    if top == "" is
+        ui::fail("cannot mount the btrfs top level of " + fsinfo::root_device())
+        util::lock_release()
+        return 1
+    end
+    let snap: string = top + "/" + store_subvol + "/" + to_string(id) + "/snapshot"
+    if !dir_exists(snap) is
+        ui::fail("snapshot #" + to_string(id) + " not found in the btrfs top level (" + snap + ")")
+        fsinfo::umount_top()
+        util::lock_release()
+        return 1
+    end
+    let backup: string = root_sub + ".before-rollback-" + util::stamp()
+    let mut rc: int = util::run("mv " + util::sq(top + "/" + root_sub) + " " + util::sq(top + "/" + backup))
+    if rc == 0 is
+        rc = util::run("btrfs subvolume snapshot " + util::sq(snap) + " " + util::sq(top + "/" + root_sub) + " >/dev/null")
+        if rc != 0 is
+            ;; put the old root back — never leave the machine without a root
+            util::run("mv " + util::sq(top + "/" + backup) + " " + util::sq(top + "/" + root_sub))
+        else is
+            carry_excludes(c, top + "/" + backup, top + "/" + root_sub)
+        end
+    end
+    util::run("sync")
+    fsinfo::umount_top()
+    util::lock_release()
+    if rc != 0 is
+        ui::fail("btrfs rollback failed — root subvolume left untouched")
+        return 1
+    end
+    util::write_file(reboot_marker(), backup)
+    ui::ok("root subvolume '" + root_sub + "' replaced by snapshot #" + to_string(id))
+    ui::note("the previous root is kept as '" + backup + "' and is removed automatically after " + to_string(config::n(c, "rollback_root_days")) + " days (see: hackeros-snapshots roots)")
+    notify::info("rolled back to snapshot #" + to_string(id) + "; previous root kept as " + backup)
+    return 0
+end
+
+;; Non-root configs, ext4, and btrfs subvolumes that are mounted somewhere: the files are
+;; synced back with rsync --delete (a subvolume that is in use cannot be swapped).
+fn rollback_rsync(c: config::Config, id: int) -> int is
+    let src: string = store::snap_path(c, id)
+    if !dir_exists(src) is
+        ui::fail("snapshot tree " + src + " is missing")
+        return 1
+    end
+    if !util::tool_exists("rsync") is
+        ui::fail("restoring needs rsync (apt install rsync)")
+        return 1
+    end
+    let r: int = util::run("rsync -aHAXx --numeric-ids --delete " + paths::rsync_excludes(c) + util::sq(src + "/") + " " + util::sq(paths::src_slash(c)))
+    if !rsync_ok(r) is
+        ui::fail("rsync restore failed")
+        return 1
+    end
+    util::run("sync")
+    ui::ok("files restored from snapshot #" + to_string(id))
+    return 0
+end
+
+;; `offline` = called from restore-init in early boot (root config only): the btrfs
+;; store is not mounted yet (it is read from the top level) and no safety snapshot
+;; can be taken.
+pub fn rollback(c: config::Config, id: int, offline: bool) -> int is
+    if !util::is_root() is
+        ui::fail("rollback needs root")
+        return 1
+    end
+    let fs: string = fsinfo::effective(c)
+    if !offline is
+        if !store::exists(c, id) is
+            ui::fail("no snapshot #" + to_string(id))
+            return 1
+        end
+        ui::line("taking a safety snapshot before rolling back …")
+        let safety: int = create_raw(c, "rollback", "Before rollback to #" + to_string(id), 0)
+        if safety < 0 is
+            ui::fail("safety snapshot failed — aborting rollback")
+            return 1
+        end
+        ui::ok("safety snapshot #" + to_string(safety))
+    end
+    if fs == "btrfs" && fsinfo::is_root_config(c) is return rollback_btrfs_root(c, id) end
+    if fsinfo::supported(fs) is return rollback_rsync(c, id) end
+    ui::fail("filesystem '" + fs + "' is not supported")
+    return 1
+end
