@@ -11,12 +11,13 @@ Napisane w **H#**, budowane przez **bit**, GUI w **Silver**.
 - **automatyczne sprzątanie starych rootów** po rollbacku (`@.before-rollback-*`),
 - **kopie zewnętrzne**: `btrfs send/receive` lub `rsync` na drugi dysk albo przez SSH,
 - **powiadomienia** (notify-send + journald + plik logu) i **ikona w trayu**,
-- CLI (`hackeros-snapshots`) + GUI (`hackeros-snapshots-gui`): lista z przewijaniem, ekran diff, przeglądarka plików, ustawienia, kreator instalacji, operacje w tle.
+- CLI (`hackeros-snapshots`) + GUI (`hackeros-snapshots-gui`, Silver 0.2 + TypeScript + Solid.js): pulpit, lista z filtrami, diff, przeglądarka plików, ustawienia, kreator instalacji, historia zadań w tle.
 
 > **Status: kod nie był kompilowany ani uruchamiany.** Nie ma go czym zbudować w środowisku, w którym powstał (brak toolchaina H# i SDL2).
 > Co **zostało sprawdzone**: parsery diffa i logika przywracania na prawdziwym `rsync`/`awk` (`sh tests/run.sh`, 6 testów przechodzi),
 > komendy shellowe, które program składa (rsync, find, du, sed, date), oraz statycznie cały kod H# — własnym linterem
 > (istnienie funkcji między modułami, liczba argumentów, deklaracje `mod`, klucze konfiguracji, kolejność definicji, balans `is`/`end`).
+> GUI (od 0.3): front-end TypeScript + Solid przechodzi `tsc`, 10 testów parserów i 37 kontroli scenariusza UI w warstwie JS Silvera (QuickJS + lustro DOM) na zamockowanych odpowiedziach backendu; składnia nowego `gui/src/*.h#` przeszła parser H#.
 > Nie sprawdzono: kompilacji H#, działania na btrfs (`btrfs send/receive`, qgroups, rollback), GRUB-a, GUI w Silverze.
 > Przed użyciem: `h# check src/main.h#` i test na **maszynie wirtualnej** (patrz „Testowanie”).
 
@@ -103,12 +104,11 @@ btrfs: przyrostowy `btrfs send -p <poprzedni skopiowany> | btrfs receive` (cel m
 `notify_level`: `off` / `errors` (domyślnie) / `all`. Błąd snapshotu, brak miejsca, nieudana kopia zewnętrzna → `notify-send` do każdej zalogowanej sesji + `journalctl -t hackeros-snapshots` + `/var/log/hackeros-snapshots.log` (sam się obraca przy 1 MB).
 `hackeros-snapshots tray` (autostart po instalacji, wymaga `yad`): ikona pokazuje stan (dysk / ostrzeżenie / błąd), podpowiedź liczbę snapshotów, menu: otwórz GUI, zrób snapshot, posprzątaj. Stan zapisuje demon w `/run/hackeros-snapshots/status`.
 
-## GUI (Silver)
+## GUI (Silver 0.2 + TypeScript + Solid.js)
 
-Zakładki: **Snapshots** (przewijana lista, wybór → porównaj / przeglądaj / przypnij / przywróć / usuń), **Diff** (klik w zmianę → przywróć ten plik z A lub B), **Browse**, **Settings**, **Offsite**, **Setup** (kreator: wybór systemu plików → podgląd zmian → zastosuj → uruchom usługę).
-Wszystko, co wymaga roota, działa jako **zadanie w tle** (`pkexec hackeros-snapshots …`), więc okno nie zamiera.
+Zakładki: **Dashboard** (liczby, zajęte miejsce, wykres typów, stan usługi, ostatnie zadania), **Snapshots** (wyszukiwarka, filtr typu, sortowanie, rozmiary, zaznaczanie wielu → porównaj / usuń, tworzenie z wyborem typu, podgląd sprzątania `--dry-run`), **Diff** (filtry rodzaju zmian i ścieżki, eksport listy, przywracanie pliku z A lub B), **Browse** (okruszki, filtr, przywracanie na miejsce albo do wybranego katalogu `--to`), **Settings** (formularz ze zmianami „do zapisania”, walidacja liczb), **Offsite**, **Activity** (historia zadań z pełnym wyjściem, kopiowanie do schowka), **Setup** (kreator). Skróty: `Ctrl+R` odśwież, `Alt+1…8` zakładki. Ostatnia zakładka, config i filtry są zapamiętywane w `~/.config/hackeros-snapshots/gui.json`.
 
-Silver v0.2 nie ma listy z przewijaniem ani timera. GUI radzi sobie tak: każdy ekran to jeden generowany HTML (`load_html_str`), a strona przewija się w całości — lista ma dowolną długość (po 100 wierszy, „Show more”). Do Silvera dołożyłem **małą łatkę** (`vendor/silver-hsnap.patch`, tylko `src/app.h#`): okresowy `on_tick`, id klikniętego elementu w stanie (`_click`) i ograniczenie przewijania do wysokości treści. Bez `tick_every` Silver zachowuje się jak oryginał. `vendor/silver` to kompletny Silver z tą łatką; `gui/Bit.hk` bierze go przez `path`.
+Wszystko, co wymaga roota, działa jako **zadanie w tle** (`app::spawn_task` → `pkexec hackeros-snapshots …`), więc okno nie zamiera. GUI używa **stockowego** Silvera ^0.2 (komendy JSON + `silver.invoke`, `on_tick`, `spawn_task`) — łatka `vendor/silver-hsnap.patch` nie jest już potrzebna. Szczegóły i uruchamianie testów: `gui/README.md`.
 
 ## Konfiguracja
 
@@ -118,8 +118,7 @@ Format `.hk`: `! komentarz`, `[sekcja]`, `-> klucz => wartość`. Domyślny plik
 
 ```
 src/       CLI + demon (H#): main cli config snap store retention usage manager diff roots offsite grub setup daemon tray notify fsinfo paths util ui
-gui/       GUI: src/ (main views jobs backend), frontend/style.css
-vendor/    silver/ (Silver + łatka) i silver-hsnap.patch
+gui/       GUI: src/ (main backend — H#), frontend/ (TypeScript + Solid.js: src/, style.css, build.mjs), tests/ (runner QuickJS)
 data/      unit systemd, hook GRUB, restore-init, hook apt, polkit, skrypty awk (diff), config.hk, .desktop (GUI, tray)
 tests/     run.sh — testy parserów diffa i przywracania (sh, awk, rsync)
 packaging/ install.sh, uninstall.sh
@@ -148,4 +147,4 @@ packaging/ install.sh, uninstall.sh
 
 ## Licencja
 
-GPL-3.0 — patrz `LICENSE`. `vendor/silver` ma własną licencję (`vendor/silver/LICENSE`).
+GPL-3.0 — patrz `LICENSE`.
