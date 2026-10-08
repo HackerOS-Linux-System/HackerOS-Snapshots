@@ -1,0 +1,17 @@
+# command <TAB> args-substring <TAB> JSON response
+sys_info		{"root":false,"service":"inactive","store":"/var/lib/hackeros-snapshots","store_exists":true,"home":"/home/t","silver":"0.2.0"}
+prefs_load		{}
+prefs_save		{"ok":true}
+file_write		{"ok":true}
+cli_read	"list","--porcelain"	{"rc":0,"out":"1\tboot\t1700000000\t2026-10-01 08:00\t-\tBoot snapshot\t6.1.0\t0\n2\tmanual\t1700003600\t2026-10-01 09:00\t*\tBefore kernel update\t6.1.0\t0\n3\ttimeline\t1700007200\t2026-10-01 10:00\t-\tTimeline\t6.1.0\t0\n"}
+cli_read	"usage","--porcelain"	{"rc":0,"out":"1\t120\n2\t2048\n3\t80\n"}
+cli_read	"usage"]	{"rc":0,"out":"Snapshots use 2.2 GB of 100 GB (2%)\n"}
+cli_read	"config","show"	{"rc":0,"out":"-> keep_boot => 5\n-> timeline => true\n-> excludes => \n-> offsite => false\n-> notify_level => errors\n"}
+cli_read	"config","list"	{"rc":0,"out":"root\nhome\n"}
+cli_read	"browse"	{"rc":0,"out":"d\t0\tetc\nd\t0\thome\nf\t2048\tvmlinuz\n"}
+cli_read	"offsite","status"	{"rc":0,"out":"target: (not set)\n"}
+cli_read	"init","--plan"	{"rc":0,"out":"fs\tbtrfs\nstep\tcreate subvolume\nwarn\tfree space is low\n"}
+task_output	"diff"	"+\t/etc/new.conf\n-\t/etc/old.conf\nc\t/etc/fstab\nc\t/usr/bin/tool\n@@rc=0\n"
+task_output	"cleanup","--dry-run"	"would delete #1\n@@rc=0\n"
+task_output	"config","apply"	"saved\n@@rc=0\n"
+task_output	"delete"	"could not delete\n@@rc=1\n"
