@@ -1,7 +1,7 @@
 [package]
 -> name        => hackeros-snapshots-gui
--> version     => 0.2.0
--> description => Silver GUI for HackerOS Snapshots (list, diff, browse, settings, offsite, setup wizard)
+-> version     => 0.3.0
+-> description => Silver GUI (TypeScript + Solid.js) for HackerOS Snapshots: dashboard, snapshots, diff, browse, settings, offsite, activity, setup wizard
 -> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
 -> license     => GPL-3.0
 -> lang        => h#
@@ -17,3 +17,17 @@
 
 [dependencies]
 -> silver => newest
+
+[hooks]
+-> pre-build => cd frontend && npm install --no-audit --no-fund && npm run build
+
+[commands]
+-> frontend
+--> run => cd frontend && npm install --no-audit --no-fund && npm run build
+--> description => Build the front-end (TypeScript + Solid -> frontend/dist/app.js)
+-> watch
+--> run => cd frontend && npm run watch
+--> description => Rebuild the front-end on every change (run next to `bit run`; hot reload picks up dist/app.js)
+-> test
+--> run => cd frontend && npm run typecheck && npm test
+--> description => Type-check the front-end and run the parser unit tests
