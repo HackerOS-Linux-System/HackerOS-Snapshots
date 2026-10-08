@@ -59,3 +59,27 @@ input { display: block; width: 170px; padding: 6px; margin: 2px; border: 1px; bo
 
 .status { padding: 8px; margin: 6px; background: #10121a; }
 .status p { color: #7fdc9a; font-size: 13px; }
+
+/* ── added in 0.3 (Solid front-end) ─────────────────────────────────────────── */
+.grow  { flex-grow: 1; }
+.nogap { gap: 0; margin: 0 4px; }
+.half  { flex-grow: 1; width: 480px; }
+.ok    { color: #7fdc9a; }
+.off   { background: #1d2029; }
+.off span { color: #5d6579; }
+.sw    { width: 38px; }
+.fl    { width: 340px; }
+.tl    { width: 110px; }
+.mono  { color: #cfd5e6; font-size: 12px; padding: 1px 4px; margin: 0; }
+.pre   { background: #10121a; padding: 8px; margin: 4px; }
+.mark  { width: 26px; padding: 5px 4px; margin: 1px 0; background: #191c24; }
+.mark:hover { background: #2a3145; }
+.mark span { color: #9aa3b8; font-size: 15px; }
+.c-size { width: 78px; }
+.bar { background: #3a5edc; padding: 6px 0; margin: 4px 2px; }
+.w0 { width: 0px; }
+.w1 { width: 15px; }  .w2 { width: 30px; }  .w3 { width: 45px; }  .w4 { width: 60px; }  .w5 { width: 75px; }
+.w6 { width: 90px; }  .w7 { width: 105px; } .w8 { width: 120px; } .w9 { width: 135px; } .w10 { width: 150px; }
+.w11 { width: 165px; } .w12 { width: 180px; } .w13 { width: 195px; } .w14 { width: 210px; } .w15 { width: 225px; }
+.w16 { width: 240px; } .w17 { width: 255px; } .w18 { width: 270px; } .w19 { width: 285px; } .w20 { width: 300px; }
+.bar span { color: #3a5edc; font-size: 4px; }
