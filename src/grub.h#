@@ -1,0 +1,122 @@
+mod util
+mod config
+mod fsinfo
+mod store
+
+pub struct Boot is
+    pub bt_kernel: string
+    pub bt_initrd: string
+    pub bt_search: string    ;; uuid of the filesystem GRUB must search for the kernel files
+    pub bt_note:   string
+end
+
+fn rel(path: string) -> string is
+    return util::capture("grub-mkrelpath " + util::sq(path) + " 2>/dev/null")
+end
+
+fn initrd_in(prefix: string, ver: string) -> string is
+    let cands: [string] = [prefix + "/boot/initrd.img-" + ver, prefix + "/boot/initramfs-" + ver + ".img", prefix + "/boot/initrd-" + ver + ".img"]
+    let mut i: int = 0
+    while i < array_len(cands) is
+        if file_exists(cands[i]) is return cands[i] end
+        i += 1
+    end
+    return ""
+end
+
+fn newest_kernel() -> string is
+    return util::capture("ls -1v /boot/vmlinuz-* 2>/dev/null | tail -1")
+end
+
+pub fn pick(c: config::Config, s: store::Snap) -> Boot is
+    let root_uuid: string = fsinfo::uuid_of("/")
+    let boot_uuid: string = fsinfo::uuid_of("/boot")
+    let ver: string = s.sn_kver
+    if ver != "" is
+        let base: string = store::snap_path(c, s.sn_id)
+        let sk: string = base + "/boot/vmlinuz-" + ver
+        let si: string = initrd_in(base, ver)
+        if file_exists(sk) && si != "" is
+            return Boot { bt_kernel: sk, bt_initrd: si, bt_search: root_uuid, bt_note: "kernel " + ver + " from the snapshot" }
+        end
+        let ck: string = "/boot/vmlinuz-" + ver
+        if file_exists(ck) is
+            return Boot { bt_kernel: ck, bt_initrd: initrd_in("", ver), bt_search: boot_uuid, bt_note: "kernel " + ver }
+        end
+    end
+    let nk: string = newest_kernel()
+    let nver: string = string_replace(util::basename_of(nk), "vmlinuz-", "")
+    return Boot { bt_kernel: nk, bt_initrd: initrd_in("", nver), bt_search: boot_uuid, bt_note: "current kernel (the snapshot's own is not available)" }
+end
+
+;; /proc/cmdline minus everything the entry sets itself.
+fn base_cmdline() -> string is
+    let toks: [string] = string_split(string_trim(util::read_or("/proc/cmdline", "quiet")), " ")
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(toks) is
+        let t: string = toks[i]
+        i += 1
+        if t == "" || t == "ro" || t == "rw" is continue end
+        if string_starts_with(t, "BOOT_IMAGE=") || string_starts_with(t, "root=") || string_starts_with(t, "rootflags=") is continue end
+        if string_starts_with(t, "init=") || string_starts_with(t, "hsnap.") is continue end
+        out = out + t + " "
+    end
+    if out == "" is return "quiet" end
+    return string_trim(out)
+end
+
+fn entry(s: store::Snap, b: Boot, root_uuid: string, flags: string, cmd: string) -> string is
+    let title: string = "HackerOS snapshot #" + to_string(s.sn_id) + "  [" + s.sn_type + "]  " + util::fmt_epoch(s.sn_epoch) + (if s.sn_desc != "" then "  " + s.sn_desc else "") + "  (" + b.bt_note + ")"
+    let safe_title: string = string_replace(title, "'", "")
+    let mut t: string = ""
+    t = t + "    menuentry 'Restore: " + safe_title + "' --class hackeros --class gnu-linux --class os \x7b\n"
+    t = t + "        insmod part_gpt\n        insmod part_msdos\n        insmod btrfs\n        insmod ext2\n"
+    t = t + "        search --no-floppy --fs-uuid --set=root " + b.bt_search + "\n"
+    t = t + "        echo 'Restoring snapshot #" + to_string(s.sn_id) + " ...'\n"
+    t = t + "        linux " + rel(b.bt_kernel) + " root=UUID=" + root_uuid + " ro " + flags + cmd + " init=/usr/lib/hackeros-snapshots/restore-init hsnap.restore=" + to_string(s.sn_id) + "\n"
+    if b.bt_initrd != "" is
+        t = t + "        initrd " + rel(b.bt_initrd) + "\n"
+    end
+    t = t + "    \x7d\n"
+    return t
+end
+
+;; Text for /etc/grub.d — must be the ONLY thing written to stdout. Root config only.
+pub fn entries(c: config::Config) -> string is
+    if !config::b(c, "grub") is return "" end
+    let list: [store::Snap] = store::all(c)
+    if array_len(list) == 0 || newest_kernel() == "" is return "" end
+
+    let root_uuid: string = fsinfo::uuid_of("/")
+    let fs: string = fsinfo::effective(c)
+    let root_sub: string = fsinfo::root_subvol()
+    let flags: string = if fs == "btrfs" && root_sub != "" then "rootflags=subvol=" + root_sub + " " else ""
+    let cmd: string = base_cmdline() + " "
+    let cap: int = config::n(c, "grub_max")
+
+    let mut out: string = "submenu 'HackerOS Snapshots (restore an older system state)' --class hackeros \x7b\n"
+    let mut shown: int = 0
+    let mut i: int = array_len(list) - 1
+    while i >= 0 && (cap <= 0 || shown < cap) is
+        out = out + entry(list[i], pick(c, list[i]), root_uuid, flags, cmd)
+        shown += 1
+        i -= 1
+    end
+    return out + "\x7d\n"
+end
+
+;; Regenerates grub.cfg with whatever tool this distro has (root config only).
+pub fn update(c: config::Config) -> int is
+    if !fsinfo::is_root_config(c) || !config::b(c, "grub") is return 0 end
+    if util::tool_exists("update-grub") is
+        return util::run("update-grub >/dev/null 2>&1")
+    end
+    if util::tool_exists("grub-mkconfig") is
+        return util::run("grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1")
+    end
+    if util::tool_exists("grub2-mkconfig") is
+        return util::run("grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1")
+    end
+    return 1
+end
