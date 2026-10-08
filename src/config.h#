@@ -1,0 +1,314 @@
+mod util
+
+pub struct Config is
+    pub cf_name: string
+    pub cf_kv:   [string]
+end
+
+;; "[section]" lines are headers, everything else is  key=default.
+fn schema() -> [string] is
+    return [
+        "[general]",
+        "enabled=true",
+        "fstype=auto",
+        "source=",
+        "store=",
+        "store_subvol=",
+        "qgroups=true",
+        "excludes=",
+        "[triggers]",
+        "snapshot_on_boot=true",
+        "timeline=true",
+        "timeline_minutes=60",
+        "apt_hooks=true",
+        "[retention]",
+        "cleanup_on_boot=true",
+        "keep_boot=5",
+        "keep_timeline=10",
+        "keep_prepost=10",
+        "keep_manual=0",
+        "max_age_days=30",
+        "keep_min=3",
+        "max_usage_percent=20",
+        "min_free_percent=10",
+        "emergency_cleanup=true",
+        "keep_rollback_roots=3",
+        "rollback_root_days=14",
+        "[grub]",
+        "grub=true",
+        "grub_max=10",
+        "[notify]",
+        "notify_level=errors",
+        "log_file=/var/log/hackeros-snapshots.log",
+        "[offsite]",
+        "offsite=false",
+        "offsite_target=",
+        "offsite_ssh_opts=",
+        "offsite_types=manual,boot",
+        "offsite_keep=10",
+        "offsite_after_create=true"
+    ]
+end
+
+fn section_note(sec: string) -> string is
+    if sec == "general"   is return "! source = what is snapshotted; store = where snapshots live (empty = derived).\n! excludes = comma separated paths inside source (btrfs: removed from every snapshot).\n" end
+    if sec == "retention" is return "! Every keep_* / max_* key: 0 = unlimited (off). max_usage_percent needs qgroups on btrfs.\n" end
+    if sec == "grub"      is return "! Only used by the root config: boot-menu entries to restore a snapshot.\n" end
+    if sec == "notify"    is return "! notify_level: off | errors | all. Only used by the root config.\n" end
+    if sec == "offsite"   is return "! target: /mnt/backup/hsnap  or  root@host:/backups/hsnap   (btrfs send/receive or rsync)\n" end
+    return ""
+end
+
+pub fn is_key(k: string) -> bool is
+    let items: [string] = schema()
+    let mut i: int = 0
+    while i < array_len(items) is
+        if !string_starts_with(items[i], "[") && string_starts_with(items[i], k + "=") is return true end
+        i += 1
+    end
+    return false
+end
+
+pub fn key_names() -> [string] is
+    let items: [string] = schema()
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(items) is
+        if !string_starts_with(items[i], "[") is
+            out = array_push(out, string_slice(items[i], 0, string_find(items[i], "=")))
+        end
+        i += 1
+    end
+    return out
+end
+
+;; ── values ───────────────────────────────────────────────────────────────────
+
+pub fn get(c: Config, key: string) -> string is
+    let pre: string = key + "="
+    let mut i: int = 0
+    while i < array_len(c.cf_kv) is
+        if string_starts_with(c.cf_kv[i], pre) is
+            return string_slice(c.cf_kv[i], string_len(pre), string_len(c.cf_kv[i]))
+        end
+        i += 1
+    end
+    return ""
+end
+
+pub fn s(c: Config, key: string) -> string is return get(c, key) end
+pub fn b(c: Config, key: string) -> bool is return util::parse_bool(get(c, key), false) end
+pub fn n(c: Config, key: string) -> int is return util::to_int_or(get(c, key), 0) end
+
+fn clamp(v: string, lo: int, hi: int, fallback: int) -> string is
+    let x: int = util::to_int_or(v, fallback)
+    if x < lo is return to_string(lo) end
+    if x > hi is return to_string(hi) end
+    return to_string(x)
+end
+
+fn normalize(key: string, val: string) -> string is
+    let v: string = string_trim(val)
+    if key == "timeline_minutes" is return clamp(v, 5, 100000, 60) end
+    if key == "keep_min" is return clamp(v, 1, 100000, 3) end
+    if key == "max_usage_percent" || key == "min_free_percent" is return clamp(v, 0, 90, 0) end
+    if string_starts_with(key, "keep_") || key == "max_age_days" || key == "rollback_root_days" || key == "grub_max" || key == "offsite_keep" is
+        return clamp(v, 0, 1000000, 0)
+    end
+    if key == "fstype" is
+        let l: string = string_lower(v)
+        if l == "btrfs" || l == "ext4" is return l end
+        return "auto"
+    end
+    if key == "notify_level" is
+        let l: string = string_lower(v)
+        if l == "off" || l == "all" is return l end
+        return "errors"
+    end
+    if key == "offsite_types" || key == "excludes" is
+        return string_replace(v, " ", "")
+    end
+    if key == "enabled" || key == "qgroups" || key == "snapshot_on_boot" || key == "timeline" || key == "apt_hooks" || key == "cleanup_on_boot" || key == "emergency_cleanup" || key == "grub" || key == "offsite" || key == "offsite_after_create" is
+        return util::bool_str(util::parse_bool(v, false))
+    end
+    return v
+end
+
+fn put(c: Config, key: string, val: string) -> Config is
+    let mut o: Config = c
+    let pre: string = key + "="
+    let mut i: int = 0
+    while i < array_len(o.cf_kv) is
+        if string_starts_with(o.cf_kv[i], pre) is
+            o.cf_kv[i] = pre + val
+            return o
+        end
+        i += 1
+    end
+    o.cf_kv = array_push(o.cf_kv, pre + val)
+    return o
+end
+
+;; Unknown keys are ignored; values are validated / clamped.
+pub fn set(c: Config, key: string, val: string) -> Config is
+    if !is_key(key) is return c end
+    return put(c, key, normalize(key, val))
+end
+
+;; ── names / paths ────────────────────────────────────────────────────────────
+
+pub fn root_path() -> string is
+    let o: string = env_get("HSNAP_CONFIG")
+    if o != "" is return o end
+    return "/etc/hackeros-snapshots/config.hk"
+end
+
+pub fn config_path() -> string is return root_path() end
+
+fn extra_dir() -> string is
+    return util::dirname_of(root_path()) + "/configs.d"
+end
+
+pub fn path_of(name: string) -> string is
+    if name == "root" is return root_path() end
+    return extra_dir() + "/" + name + ".hk"
+end
+
+pub fn valid_name(name: string) -> bool is
+    let n: int = string_len(name)
+    if n == 0 || n > 32 is return false end
+    let ok: string = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+    let mut i: int = 0
+    while i < n is
+        if !string_contains(ok, string_at(name, i)) is return false end
+        i += 1
+    end
+    return true
+end
+
+pub fn exists(name: string) -> bool is
+    if name == "root" is return true end
+    return file_exists(path_of(name))
+end
+
+pub fn names() -> [string] is
+    let mut out: [string] = ["root"]
+    let raw: string = util::capture("ls -1 " + util::sq(extra_dir()) + " 2>/dev/null | sed -n 's/\\.hk$//p' | sort")
+    if raw == "" is return out end
+    let parts: [string] = string_split(raw, "\n")
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if valid_name(parts[i]) && parts[i] != "root" is out = array_push(out, parts[i]) end
+        i += 1
+    end
+    return out
+end
+
+;; ── load / save ──────────────────────────────────────────────────────────────
+
+pub fn defaults(name: string) -> Config is
+    let items: [string] = schema()
+    let mut kv: [string] = []
+    let mut i: int = 0
+    while i < array_len(items) is
+        if !string_starts_with(items[i], "[") is kv = array_push(kv, items[i]) end
+        i += 1
+    end
+    let mut c: Config = Config { cf_name: name, cf_kv: kv }
+    if name == "root" is
+        c = put(c, "source", "/")
+    else is
+        c = put(c, "apt_hooks", "false")
+        c = put(c, "keep_boot", "3")
+        c = put(c, "keep_timeline", "6")
+    end
+    return c
+end
+
+;; derived values that depend on other keys
+fn finalize(c: Config) -> Config is
+    let mut o: Config = c
+    if get(o, "store") == "" is
+        if o.cf_name == "root" is
+            o = put(o, "store", "/.snapshots")
+        else is
+            let src: string = get(o, "source")
+            if src != "" is
+                o = put(o, "store", (if src == "/" then "" else src) + "/.snapshots")
+            end
+        end
+    end
+    return o
+end
+
+;; A config without a source (a hand-made file that forgot it) must never run.
+pub fn valid(c: Config) -> bool is
+    return get(c, "source") != "" && get(c, "store") != ""
+end
+
+pub fn load_named(name: string) -> Config is
+    let mut c: Config = defaults(name)
+    let path: string = path_of(name)
+    if !file_exists(path) is return finalize(c) end
+    let lines: [string] = string_split(string_replace(file_read(path), "\r", ""), "\n")
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let ln: string = string_trim(lines[i])
+        i += 1
+        if !string_starts_with(ln, "->") || string_starts_with(ln, "-->") is continue end
+        let body: string = string_trim(string_slice(ln, 2, string_len(ln)))
+        let arrow: int = string_find(body, "=>")
+        if arrow < 0 is continue end
+        let key: string = string_trim(string_slice(body, 0, arrow))
+        let mut val: string = string_trim(string_slice(body, arrow + 2, string_len(body)))
+        if string_len(val) >= 2 && string_starts_with(val, "\"") && string_ends_with(val, "\"") is
+            val = string_slice(val, 1, string_len(val) - 1)
+        end
+        c = set(c, key, val)
+    end
+    return finalize(c)
+end
+
+pub fn load() -> Config is
+    return load_named("root")
+end
+
+pub fn render(c: Config) -> string is
+    let items: [string] = schema()
+    let mut t: string = "! HackerOS Snapshots — config \"" + c.cf_name + "\"\n"
+    t = t + "! Edit by hand, with `hackeros-snapshots config set <key> <value>` or in the GUI.\n"
+    let mut i: int = 0
+    while i < array_len(items) is
+        let it: string = items[i]
+        i += 1
+        if string_starts_with(it, "[") is
+            let sec: string = string_slice(it, 1, string_len(it) - 1)
+            t = t + "\n" + section_note(sec) + it + "\n"
+        else is
+            let key: string = string_slice(it, 0, string_find(it, "="))
+            t = t + "-> " + util::pad_right(key, 22) + " => " + get(c, key) + "\n"
+        end
+    end
+    return t
+end
+
+pub fn save(c: Config) -> int is
+    let path: string = path_of(c.cf_name)
+    util::mkdir_p(util::dirname_of(path))
+    file_write(path, render(c))
+    util::run("chmod 644 " + util::sq(path))
+    return 0
+end
+
+;; New extra config for `source` (a btrfs subvolume or any ext4 directory).
+pub fn create(name: string, source: string) -> Config is
+    let mut c: Config = defaults(name)
+    c = put(c, "source", source)
+    return finalize(c)
+end
+
+pub fn delete(name: string) -> bool is
+    if name == "root" is return false end
+    util::run("rm -f " + util::sq(path_of(name)))
+    return !file_exists(path_of(name))
+end
