@@ -1,0 +1,53 @@
+mod util
+mod ui
+mod config
+mod fsinfo
+mod store
+mod snap
+mod usage
+mod retention
+mod notify
+
+;; false = do not create (and the reason has been reported)
+fn preflight(c: config::Config) -> bool is
+    let need: int = config::n(c, "min_free_percent")
+    if need <= 0 is return true end
+    let free: int = usage::free_percent(c)
+    if free >= need is return true end
+    ui::warn("only " + to_string(free) + "% free (minimum " + to_string(need) + "%)")
+    if config::b(c, "emergency_cleanup") is
+        if retention::emergency(c) is
+            ui::ok("freed space by deleting the oldest snapshots")
+            return true
+        end
+    end
+    notify::event("error", "HackerOS Snapshots: disk almost full",
+        "Only " + to_string(usage::free_percent(c)) + "% free on the snapshot filesystem (config " + c.cf_name + "). No snapshot was taken. Delete old snapshots or free up space.")
+    notify::set_health("error", "low disk space (config " + c.cf_name + ")")
+    return false
+end
+
+;; Returns the new id, -1 on failure, -2 when skipped on purpose. `automatic` = daemon / hooks (skipped while a rollback waits for a reboot).
+pub fn take(c: config::Config, stype: string, desc: string, pre: int, automatic: bool) -> int is
+    if automatic && fsinfo::is_root_config(c) && snap::reboot_pending() is
+        notify::info("skipping " + stype + " snapshot: a rollback is waiting for a reboot")
+        return -2
+    end
+    if !config::valid(c) is
+        ui::fail("config '" + c.cf_name + "' has no source — check " + config::path_of(c.cf_name))
+        return -1
+    end
+    if !preflight(c) is return -1 end
+    let id: int = snap::create_raw(c, stype, desc, pre)
+    if id < 0 is
+        notify::event("error", "HackerOS Snapshots: snapshot failed",
+            "Could not create a " + stype + " snapshot of config " + c.cf_name + ". See: journalctl -t hackeros-snapshots")
+        notify::set_health("error", "snapshot failed (config " + c.cf_name + ")")
+        return -1
+    end
+    notify::info("created " + stype + " snapshot #" + to_string(id) + " of config " + c.cf_name)
+    if automatic is
+        notify::event("info", "HackerOS Snapshots", "Snapshot #" + to_string(id) + " (" + stype + ") created — config " + c.cf_name)
+    end
+    return id
+end
