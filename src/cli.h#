@@ -1,0 +1,712 @@
+mod util
+mod ui
+mod config
+mod fsinfo
+mod store
+mod snap
+mod paths
+mod usage
+mod diff
+mod manager
+mod retention
+mod roots
+mod grub
+mod offsite
+mod notify
+mod daemon
+mod setup
+mod tray
+
+pub struct Opts is
+    pub op_desc:      string
+    pub op_type:      string
+    pub op_config:    string
+    pub op_source:    string
+    pub op_to:        string
+    pub op_fs:        string
+    pub op_method:    string
+    pub op_pre:       int
+    pub op_porcelain: bool
+    pub op_yes:       bool
+    pub op_force:     bool
+    pub op_dry:       bool
+    pub op_offline:   bool
+    pub op_all:       bool
+    pub op_plan:      bool
+    pub op_nobackup:  bool
+    pub op_delete:    bool
+    pub op_deep:      bool
+    pub op_usage:     bool
+end
+
+pub fn version() -> string is return "0.2.0" end
+
+pub fn print_help() is
+    write("")
+    write("  " + ui::bold("hackeros-snapshots") + " " + version() + " — filesystem snapshots for HackerOS (btrfs / ext4)")
+    write("")
+    write("  " + ui::bold("USAGE") + "   hackeros-snapshots [-c CONFIG] <command> [options]      (default config: root)")
+    write("")
+    write("  " + ui::bold("SNAPSHOTS"))
+    write("    create [-d TEXT] [-t TYPE]       take a snapshot now (type: manual, boot, timeline, pre, post)")
+    write("    list [--usage] [--porcelain]     list snapshots")
+    write("    delete <id...> [--force]         delete snapshots (pinned ones need --force)")
+    write("    pin <id> | unpin <id>            protect / unprotect a snapshot from cleanup")
+    write("    cleanup [--dry-run] [--all]      apply the retention rules now (count, age, disk usage, old roots)")
+    write("    usage                            disk space taken by every snapshot")
+    write("")
+    write("  " + ui::bold("LOOK INSIDE / GET FILES BACK"))
+    write("    diff <a> [b]                     what changed between snapshot a and b (default: the live system)")
+    write("                                     [--method send|rsync] [--deep = compare contents] [--porcelain]")
+    write("    browse <id> [/path]              list a directory inside a snapshot")
+    write("    restore <id> <path...>           bring single files / directories back  [--to DIR] [--delete] [--no-backup] [-y]")
+    write("    rollback <id> [-y]               restore the WHOLE system to a snapshot (reboot afterwards)")
+    write("")
+    write("  " + ui::bold("CONFIGS, SETUP, BACKUP"))
+    write("    config [show | get K | set K V | apply K=V… | keys | list | create NAME --source DIR | delete NAME]")
+    write("    init [--plan] [--fs btrfs|ext4] [-y]   prepare the snapshot store of a config (shows what will change)")
+    write("    status                           overview of every config")
+    write("    offsite [status | run | test | prune]  copy snapshots to another disk / host (btrfs send, rsync)")
+    write("    roots [list | prune | delete NAME]     old root subvolumes left by btrfs rollbacks")
+    write("")
+    write("  " + ui::bold("BACKGROUND / INTEGRATION"))
+    write("    daemon | boot                    background loop (systemd) / the on-boot tasks once")
+    write("    tray                             notification-area icon (needs yad)")
+    write("    grub-entries | grub-update       GRUB menu entries / regenerate grub.cfg")
+    write("    apt-pre | apt-post               hooks used by /etc/apt/apt.conf.d/80hackeros-snapshots")
+    write("    notify-test                      send a test notification")
+    write("")
+    write("  " + ui::bold("GUI") + "     hackeros-snapshots-gui   (Silver, see gui/)")
+    write("")
+end
+
+fn need_root() -> bool is
+    if util::is_root() is return true end
+    ui::fail("this command needs root (try: sudo hackeros-snapshots …)")
+    return false
+end
+
+fn arg_id(pos: [string], i: int) -> int is
+    if i >= array_len(pos) is return -1 end
+    return util::to_int_or(string_replace(pos[i], "#", ""), -1)
+end
+
+;; "current" / "live" / "now" / "0" → 0 (the live system)
+fn arg_side(pos: [string], i: int) -> int is
+    if i >= array_len(pos) is return 0 end
+    let t: string = string_lower(pos[i])
+    if t == "current" || t == "live" || t == "now" || t == "0" is return 0 end
+    return arg_id(pos, i)
+end
+
+fn config_ready(c: config::Config) -> bool is
+    if config::valid(c) is return true end
+    ui::fail("config '" + c.cf_name + "' has no source — check " + config::path_of(c.cf_name))
+    return false
+end
+
+;; ── snapshots ────────────────────────────────────────────────────────────────
+
+fn cmd_create(c: config::Config, o: Opts) -> int is
+    if !need_root() || !config_ready(c) is return 1 end
+    let t: string = if o.op_type != "" then o.op_type else "manual"
+    if t != "manual" && t != "boot" && t != "timeline" && t != "pre" && t != "post" is
+        ui::fail("unknown type '" + t + "' (manual, boot, timeline, pre, post)")
+        return 2
+    end
+    let d: string = if o.op_desc != "" then o.op_desc else "Manual snapshot"
+    let id: int = manager::take(c, t, d, o.op_pre, false)
+    if id < 0 is return 1 end
+    ui::ok("snapshot #" + to_string(id) + " created  (" + c.cf_name + ")")
+    if offsite::enabled(c) && config::b(c, "offsite_after_create") && util::has_str(util::csv(config::s(c, "offsite_types")), t) is
+        offsite::sync(c)
+    end
+    grub::update(c)
+    return 0
+end
+
+fn cmd_list(c: config::Config, o: Opts) -> int is
+    let list: [store::Snap] = store::all(c)
+    let mut usg: [usage::Use] = []
+    if o.op_usage is usg = usage::per_snapshot(c, false) end
+    if o.op_porcelain is
+        ;; id type epoch date pinned desc kver pre   (tab separated)
+        let mut i: int = 0
+        while i < array_len(list) is
+            let s: store::Snap = list[i]
+            write(to_string(s.sn_id) + "\t" + s.sn_type + "\t" + to_string(s.sn_epoch) + "\t" + util::fmt_epoch(s.sn_epoch) + "\t" + (if s.sn_pinned then "*" else "-") + "\t" + s.sn_desc + "\t" + s.sn_kver + "\t" + to_string(s.sn_pre))
+            i += 1
+        end
+        return 0
+    end
+    if array_len(list) == 0 is
+        ui::note("no snapshots yet in config '" + c.cf_name + "' — take one with: sudo hackeros-snapshots create")
+        return 0
+    end
+    ui::blank()
+    write("  " + ui::bold(util::pad_right("ID", 6) + util::pad_right("TYPE", 10) + util::pad_right("DATE", 18) + util::pad_right("PIN", 5) + (if o.op_usage then util::pad_right("SIZE", 11) else "") + "DESCRIPTION"))
+    let mut i: int = array_len(list) - 1
+    while i >= 0 is
+        let s: store::Snap = list[i]
+        write("  " + util::pad_right("#" + to_string(s.sn_id), 6) + util::pad_right(s.sn_type, 10) + util::pad_right(util::fmt_epoch(s.sn_epoch), 18) + util::pad_right(if s.sn_pinned then "*" else "", 5) + (if o.op_usage then util::pad_right(if array_len(usg) > 0 then usage::fmt_mb(usage::mb_of(usg, s.sn_id)) else "?", 11) else "") + s.sn_desc)
+        i -= 1
+    end
+    ui::blank()
+    return 0
+end
+
+fn cmd_delete(c: config::Config, pos: [string], o: Opts) -> int is
+    if !need_root() is return 1 end
+    if array_len(pos) == 0 is
+        ui::fail("usage: hackeros-snapshots delete <id...>")
+        return 2
+    end
+    let mut rc: int = 0
+    let mut i: int = 0
+    while i < array_len(pos) is
+        let id: int = arg_id(pos, i)
+        i += 1
+        if id < 0 is
+            ui::fail("not a snapshot id")
+            rc = 1
+        else if snap::delete(c, id, o.op_force) is
+            ui::ok("deleted #" + to_string(id))
+        else is
+            rc = 1
+        end
+    end
+    grub::update(c)
+    return rc
+end
+
+fn cmd_rollback(c: config::Config, pos: [string], o: Opts) -> int is
+    let id: int = arg_id(pos, 0)
+    if id < 0 is
+        ui::fail("usage: hackeros-snapshots rollback <id>")
+        return 2
+    end
+    if !o.op_offline && !o.op_yes is
+        ui::warn("this replaces the current state of '" + c.cf_name + "' with snapshot #" + to_string(id) + " (a safety snapshot is taken first).")
+        if !util::confirm("Continue?") is
+            ui::note("aborted")
+            return 1
+        end
+    end
+    let rc: int = snap::rollback(c, id, o.op_offline)
+    if rc == 0 && !o.op_offline && fsinfo::is_root_config(c) is
+        ui::warn("reboot now to finish:  sudo systemctl reboot")
+    end
+    return rc
+end
+
+fn cmd_pin(c: config::Config, pos: [string], pinned: bool) -> int is
+    if !need_root() is return 1 end
+    let id: int = arg_id(pos, 0)
+    if id < 0 is
+        ui::fail("usage: hackeros-snapshots pin|unpin <id>")
+        return 2
+    end
+    if snap::set_pinned(c, id, pinned) is
+        ui::ok("snapshot #" + to_string(id) + (if pinned then " pinned" else " unpinned"))
+        return 0
+    end
+    return 1
+end
+
+fn cleanup_one(c: config::Config, o: Opts) -> int is
+    if !dir_exists(config::s(c, "store")) is return 0 end
+    let n: int = retention::cleanup(c, o.op_dry, true)
+    if !o.op_dry && n > 0 is grub::update(c) end
+    return n
+end
+
+fn cmd_cleanup(c: config::Config, o: Opts) -> int is
+    if !o.op_dry && !need_root() is return 1 end
+    let mut total: int = 0
+    if o.op_all is
+        let names: [string] = config::names()
+        let mut i: int = 0
+        while i < array_len(names) is
+            total += cleanup_one(config::load_named(names[i]), o)
+            i += 1
+        end
+    else is
+        total = cleanup_one(c, o)
+    end
+    if o.op_dry is
+        ui::note(to_string(total) + " item(s) would be deleted")
+    else is
+        ui::ok(to_string(total) + " item(s) deleted")
+    end
+    return 0
+end
+
+fn cmd_usage(c: config::Config, o: Opts) -> int is
+    let fs: string = fsinfo::effective(c)
+    let usg: [usage::Use] = usage::per_snapshot(c, true)
+    if o.op_porcelain is
+        let mut k: int = 0
+        while k < array_len(usg) is
+            write(to_string(usg[k].us_id) + "\t" + to_string(usg[k].us_mb))
+            k += 1
+        end
+        return 0
+    end
+    ui::heading("Disk usage — config " + c.cf_name)
+    ui::line(util::pad_right("filesystem", 18) + fs + "   " + to_string(usage::free_percent(c)) + "% free  (" + usage::fmt_mb(usage::avail_mb(c)) + " of " + usage::fmt_mb(usage::total_mb(c)) + ")")
+    let limit: int = usage::limit_mb(c)
+    ui::line(util::pad_right("limit", 18) + (if limit > 0 then to_string(config::n(c, "max_usage_percent")) + "% of the disk = " + usage::fmt_mb(limit) else "none (max_usage_percent = 0)"))
+    if array_len(usg) == 0 is
+        if fs == "btrfs" is
+            ui::warn("btrfs qgroups are off — run: hackeros-snapshots init   (or: btrfs quota enable /)")
+        else is
+            ui::note("no snapshots")
+        end
+        return 0
+    end
+    ui::line(util::pad_right("snapshots use", 18) + usage::fmt_mb(usage::sum(usg)))
+    ui::blank()
+    let list: [store::Snap] = store::all(c)
+    let mut i: int = array_len(list) - 1
+    while i >= 0 is
+        ui::line(util::pad_right("#" + to_string(list[i].sn_id), 7) + util::pad_right(list[i].sn_type, 10) + util::pad_right(util::fmt_epoch(list[i].sn_epoch), 18) + usage::fmt_mb(usage::mb_of(usg, list[i].sn_id)))
+        i -= 1
+    end
+    ui::note(if fs == "btrfs" then "sizes = data only this snapshot holds (btrfs qgroup exclusive)" else "sizes = what is new compared with all NEWER snapshots (hard links counted once)")
+    ui::blank()
+    return 0
+end
+
+;; ── look inside / get files back ─────────────────────────────────────────────
+
+fn kind_label(k: string) -> string is
+    if k == "+" is return ui::green("+ added   ") end
+    if k == "-" is return ui::red("- deleted ") end
+    if k == "c" is return ui::yellow("~ changed ") end
+    if k == "r" is return ui::cyan("> renamed ") end
+    return ui::dim("· metadata")
+end
+
+fn cmd_diff(c: config::Config, pos: [string], o: Opts) -> int is
+    let a: int = arg_id(pos, 0)
+    let b: int = arg_side(pos, 1)
+    if a <= 0 || b < 0 is
+        ui::fail("usage: hackeros-snapshots diff <id> [id | current]")
+        return 2
+    end
+    if !store::exists(c, a) || (b > 0 && !store::exists(c, b)) is
+        ui::fail("no such snapshot")
+        return 1
+    end
+    let lines: [string] = diff::changes(c, a, b, o.op_method, o.op_deep)
+    if o.op_porcelain is
+        let mut p: int = 0
+        while p < array_len(lines) is
+            write(lines[p])
+            p += 1
+        end
+        return 0
+    end
+    ui::heading("#" + to_string(a) + "  →  " + (if b == 0 then "current system" else "#" + to_string(b)) + "   (config " + c.cf_name + ")")
+    if array_len(lines) == 0 is
+        ui::note("no differences")
+        ui::blank()
+        return 0
+    end
+    let mut n_add: int = 0
+    let mut n_del: int = 0
+    let mut n_chg: int = 0
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let f: [string] = string_split(lines[i], "\t")
+        i += 1
+        if array_len(f) < 2 is continue end
+        ui::line(kind_label(f[0]) + " " + f[1])
+        if f[0] == "+" is n_add += 1 else if f[0] == "-" is n_del += 1 else is n_chg += 1 end
+    end
+    ui::blank()
+    ui::note(to_string(n_add) + " added, " + to_string(n_del) + " deleted, " + to_string(n_chg) + " changed / renamed")
+    ui::note("get a file back:  sudo hackeros-snapshots restore " + to_string(a) + " /path/to/file")
+    ui::blank()
+    return 0
+end
+
+fn cmd_browse(c: config::Config, pos: [string], o: Opts) -> int is
+    let id: int = arg_id(pos, 0)
+    if id <= 0 || !store::exists(c, id) is
+        ui::fail("usage: hackeros-snapshots browse <id> [/path]")
+        return 2
+    end
+    let rel: string = if array_len(pos) > 1 then pos[1] else "/"
+    let lines: [string] = diff::browse(c, id, rel)
+    if o.op_porcelain is
+        let mut p: int = 0
+        while p < array_len(lines) is
+            write(lines[p])
+            p += 1
+        end
+        return 0
+    end
+    ui::heading("snapshot #" + to_string(id) + ":" + rel)
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let f: [string] = string_split(lines[i], "\t")
+        i += 1
+        if array_len(f) < 3 is continue end
+        if f[0] == "d" is ui::line(ui::cyan(f[2] + "/")) else is ui::line(f[2] + ui::dim("   " + f[1] + " B")) end
+    end
+    if array_len(lines) == 0 is ui::note("(empty or not found)") end
+    ui::blank()
+    return 0
+end
+
+fn cmd_restore(c: config::Config, pos: [string], o: Opts) -> int is
+    let id: int = arg_id(pos, 0)
+    if id <= 0 || array_len(pos) < 2 is
+        ui::fail("usage: hackeros-snapshots restore <id> <path...> [--to DIR] [--delete] [--no-backup]")
+        return 2
+    end
+    let mut items: [string] = []
+    let mut i: int = 1
+    while i < array_len(pos) is
+        items = array_push(items, pos[i])
+        i += 1
+    end
+    if o.op_to == "" && !o.op_yes is
+        ui::warn("this overwrites " + to_string(array_len(items)) + " path(s) in place with the versions from snapshot #" + to_string(id) + (if o.op_nobackup then " (NO backup of the current files)." else " (current files are backed up first)."))
+        if !util::confirm("Continue?") is
+            ui::note("aborted")
+            return 1
+        end
+    end
+    return diff::restore(c, id, items, o.op_to, !o.op_nobackup, o.op_delete)
+end
+
+;; ── status / config / setup ──────────────────────────────────────────────────
+
+fn status_one(c: config::Config) is
+    let fs: string = fsinfo::effective(c)
+    let list: [store::Snap] = store::all(c)
+    ui::heading("config '" + c.cf_name + "'   " + (if config::b(c, "enabled") then "" else "(disabled)"))
+    ui::line(util::pad_right("filesystem", 18) + fs + (if fsinfo::supported(fs) then "" else "   (unsupported)"))
+    ui::line(util::pad_right("source", 18) + config::s(c, "source"))
+    ui::line(util::pad_right("store", 18) + config::s(c, "store") + (if dir_exists(config::s(c, "store")) then "" else "   (missing — run: init -c " + c.cf_name + ")"))
+    ui::line(util::pad_right("snapshots", 18) + to_string(array_len(list)) + "   " + to_string(usage::free_percent(c)) + "% free")
+    ui::line(util::pad_right("on boot", 18) + "snapshot=" + config::s(c, "snapshot_on_boot") + "  cleanup=" + config::s(c, "cleanup_on_boot"))
+    ui::line(util::pad_right("timeline", 18) + config::s(c, "timeline") + "  every " + config::s(c, "timeline_minutes") + " min")
+    ui::line(util::pad_right("keep", 18) + "boot=" + config::s(c, "keep_boot") + " timeline=" + config::s(c, "keep_timeline") + " prepost=" + config::s(c, "keep_prepost") + " manual=" + config::s(c, "keep_manual") + "  (0 = unlimited)")
+    ui::line(util::pad_right("limits", 18) + "age=" + config::s(c, "max_age_days") + "d  disk=" + config::s(c, "max_usage_percent") + "%  min free=" + config::s(c, "min_free_percent") + "%  keep_min=" + config::s(c, "keep_min"))
+    if config::s(c, "excludes") != "" is ui::line(util::pad_right("excludes", 18) + config::s(c, "excludes")) end
+    ui::line(util::pad_right("offsite", 18) + (if offsite::enabled(c) then config::s(c, "offsite_target") + "  (" + to_string(array_len(offsite::synced(c))) + " copied)" else "off"))
+    ui::line(util::pad_right("would clean", 18) + to_string(array_len(retention::victims(c, false))) + " snapshot(s) on the next cleanup")
+end
+
+fn cmd_status() -> int is
+    let root: config::Config = config::load()
+    let state: string = notify::health_field("state", "unknown")
+    ui::heading("HackerOS Snapshots " + version())
+    ui::line(util::pad_right("service", 18) + state + (if notify::health_field("message", "") != "" then " — " + notify::health_field("message", "") else ""))
+    ui::line(util::pad_right("GRUB entries", 18) + config::s(root, "grub") + "  (newest " + config::s(root, "grub_max") + ")")
+    ui::line(util::pad_right("notifications", 18) + config::s(root, "notify_level") + "   log: " + config::s(root, "log_file"))
+    if snap::reboot_pending() is ui::warn("a rollback is waiting for a reboot") end
+    let names: [string] = config::names()
+    let mut i: int = 0
+    while i < array_len(names) is
+        status_one(config::load_named(names[i]))
+        i += 1
+    end
+    ui::blank()
+    return 0
+end
+
+fn cmd_config(c: config::Config, pos: [string], o: Opts) -> int is
+    let sub: string = if array_len(pos) > 0 then pos[0] else "show"
+    if sub == "show" is
+        write(config::render(c))
+        return 0
+    end
+    if sub == "list" is
+        let names: [string] = config::names()
+        let mut i: int = 0
+        while i < array_len(names) is
+            if o.op_porcelain is
+                let n: config::Config = config::load_named(names[i])
+                write(names[i] + "\t" + config::s(n, "source") + "\t" + config::s(n, "enabled"))
+            else is
+                write(names[i])
+            end
+            i += 1
+        end
+        return 0
+    end
+    if sub == "keys" is
+        let keys: [string] = config::key_names()
+        let mut i: int = 0
+        while i < array_len(keys) is
+            write(keys[i])
+            i += 1
+        end
+        return 0
+    end
+    if sub == "get" && array_len(pos) >= 2 is
+        if !config::is_key(pos[1]) is
+            ui::fail("unknown key '" + pos[1] + "'")
+            return 1
+        end
+        write(config::get(c, pos[1]))
+        return 0
+    end
+    if sub == "set" && array_len(pos) >= 3 is
+        if !need_root() is return 1 end
+        if !config::is_key(pos[1]) is
+            ui::fail("unknown key '" + pos[1] + "'   (hackeros-snapshots config keys)")
+            return 1
+        end
+        let n: config::Config = config::set(c, pos[1], pos[2])
+        config::save(n)
+        ui::ok(c.cf_name + ": " + pos[1] + " = " + config::get(config::load_named(c.cf_name), pos[1]))
+        return 0
+    end
+    if sub == "apply" && array_len(pos) >= 2 is
+        ;; several KEY=VALUE pairs in one go (one privileged call, one file write) — used by the GUI
+        if !need_root() is return 1 end
+        let mut n: config::Config = c
+        let mut applied: int = 0
+        let mut k: int = 1
+        while k < array_len(pos) is
+            let eq: int = string_find(pos[k], "=")
+            let key: string = if eq > 0 then string_slice(pos[k], 0, eq) else ""
+            k += 1
+            if key == "" || !config::is_key(key) is
+                ui::fail("bad KEY=VALUE pair: " + pos[k - 1])
+                return 1
+            end
+            n = config::set(n, key, string_slice(pos[k - 1], eq + 1, string_len(pos[k - 1])))
+            applied += 1
+        end
+        config::save(n)
+        ui::ok(c.cf_name + ": " + to_string(applied) + " setting(s) saved")
+        return 0
+    end
+    if sub == "create" && array_len(pos) >= 2 is
+        if !need_root() is return 1 end
+        let name: string = pos[1]
+        if !config::valid_name(name) || name == "root" is
+            ui::fail("config names: 1-32 chars of a-z 0-9 _ -  ('root' is taken)")
+            return 1
+        end
+        if config::exists(name) is
+            ui::fail("config '" + name + "' already exists")
+            return 1
+        end
+        if o.op_source == "" || !dir_exists(o.op_source) is
+            ui::fail("give an existing directory:  config create " + name + " --source /home")
+            return 2
+        end
+        config::save(config::create(name, o.op_source))
+        ui::ok("config '" + name + "' created (" + o.op_source + ") — now: sudo hackeros-snapshots -c " + name + " init")
+        return 0
+    end
+    if sub == "delete" && array_len(pos) >= 2 is
+        if !need_root() is return 1 end
+        if pos[1] == "root" || !config::exists(pos[1]) is
+            ui::fail("no such (deletable) config: " + pos[1])
+            return 1
+        end
+        config::delete(pos[1])
+        ui::ok("config '" + pos[1] + "' removed — its snapshots were NOT deleted (see the store directory)")
+        return 0
+    end
+    ui::fail("usage: hackeros-snapshots config [show | get K | set K V | keys | list | create NAME --source DIR | delete NAME]")
+    return 2
+end
+
+fn cmd_init(c: config::Config, o: Opts) -> int is
+    let mut cc: config::Config = c
+    if o.op_fs != "" is cc = config::set(cc, "fstype", o.op_fs) end
+    let p: setup::Plan = setup::plan(cc)
+    if o.op_plan is
+        setup::print_plan(p, o.op_porcelain)
+        if array_len(p.pl_errors) > 0 is return 1 end
+        return 0
+    end
+    if !o.op_yes is
+        setup::print_plan(p, false)
+        if array_len(p.pl_errors) > 0 is return 1 end
+        if !util::confirm("Apply these changes?") is
+            ui::note("aborted")
+            return 1
+        end
+    end
+    return setup::init(cc)
+end
+
+fn cmd_offsite(c: config::Config, pos: [string]) -> int is
+    let sub: string = if array_len(pos) > 0 then pos[0] else "status"
+    if sub == "status" is
+        offsite::status(c)
+        return 0
+    end
+    if !need_root() is return 1 end
+    if sub == "test" is
+        if offsite::test(c) is
+            ui::ok("target is reachable and writable")
+            return 0
+        end
+        return 1
+    end
+    if sub == "run" || sub == "sync" is
+        let n: int = offsite::sync(c)
+        if n < 0 is return 1 end
+        ui::ok(to_string(n) + " snapshot(s) copied")
+        return 0
+    end
+    if sub == "prune" is
+        ui::ok(to_string(offsite::prune(c)) + " old copy/copies removed from the target")
+        return 0
+    end
+    ui::fail("usage: hackeros-snapshots offsite [status | run | test | prune]")
+    return 2
+end
+
+fn cmd_roots(c: config::Config, pos: [string], o: Opts) -> int is
+    if !need_root() is return 1 end
+    if fsinfo::effective(c) != "btrfs" || !fsinfo::is_root_config(c) is
+        ui::note("old roots only exist for the root config on btrfs")
+        return 0
+    end
+    let sub: string = if array_len(pos) > 0 then pos[0] else "list"
+    if sub == "list" is
+        let list: [roots::Root] = roots::list()
+        let mut i: int = 0
+        while i < array_len(list) is
+            if o.op_porcelain is
+                write(list[i].rt_name + "\t" + to_string(list[i].rt_epoch) + "\t" + (if list[i].rt_running then "running" else "idle"))
+            else is
+                ui::line(util::pad_right(list[i].rt_name, 40) + util::fmt_epoch(list[i].rt_epoch) + (if list[i].rt_running then "   (still mounted — reboot first)" else ""))
+            end
+            i += 1
+        end
+        if array_len(list) == 0 && !o.op_porcelain is ui::note("no old roots") end
+        fsinfo::umount_top()
+        return 0
+    end
+    if sub == "prune" is
+        let n: int = roots::prune(c, o.op_dry)
+        ui::note(to_string(n) + " old root(s) " + (if o.op_dry then "would be deleted" else "deleted"))
+        return 0
+    end
+    if sub == "delete" && array_len(pos) >= 2 is
+        if roots::delete_named(pos[1]) is
+            ui::ok("deleted " + pos[1])
+            return 0
+        end
+        return 1
+    end
+    ui::fail("usage: hackeros-snapshots roots [list | prune | delete NAME]")
+    return 2
+end
+
+;; ── apt hooks ────────────────────────────────────────────────────────────────
+;; Must NEVER break apt: always return 0.
+
+fn apt_state() -> string is return "/run/hackeros-snapshots.apt-pre" end
+
+fn cmd_apt_pre() -> int is
+    if !util::is_root() is return 0 end
+    let names: [string] = config::names()
+    let mut state: string = ""
+    let mut i: int = 0
+    while i < array_len(names) is
+        let c: config::Config = config::load_named(names[i])
+        i += 1
+        if !config::b(c, "enabled") || !config::b(c, "apt_hooks") || !config::valid(c) || !dir_exists(config::s(c, "store")) is continue end
+        let id: int = manager::take(c, "pre", "apt", 0, true)
+        if id > 0 is state = state + c.cf_name + "=" + to_string(id) + "\n" end
+    end
+    if state != "" is util::write_file(apt_state(), state) end
+    return 0
+end
+
+fn cmd_apt_post() -> int is
+    if !util::is_root() || !file_exists(apt_state()) is return 0 end
+    let lines: [string] = string_split(util::read_or(apt_state(), ""), "\n")
+    util::run("rm -f " + util::sq(apt_state()))
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let eq: int = string_find(lines[i], "=")
+        let ln: string = lines[i]
+        i += 1
+        if eq <= 0 is continue end
+        let name: string = string_slice(ln, 0, eq)
+        let pre: int = util::to_int_or(string_slice(ln, eq + 1, string_len(ln)), 0)
+        if pre <= 0 || !config::exists(name) is continue end
+        let c: config::Config = config::load_named(name)
+        let id: int = manager::take(c, "post", "apt (after #" + to_string(pre) + ")", pre, true)
+        if id > 0 is
+            retention::cleanup(c, false, false)
+            grub::update(c)
+        end
+    end
+    return 0
+end
+
+;; ── dispatch ─────────────────────────────────────────────────────────────────
+
+pub fn dispatch(cmd: string, pos: [string], o: Opts) -> int is
+    let name: string = if o.op_config != "" then o.op_config else "root"
+    if !config::exists(name) is
+        ui::fail("no config '" + name + "'   (hackeros-snapshots config list)")
+        return 1
+    end
+    let c: config::Config = config::load_named(name)
+    match cmd is
+        "create"        => is return cmd_create(c, o) end
+        "list" | "ls"   => is return cmd_list(c, o) end
+        "delete" | "rm" => is return cmd_delete(c, pos, o) end
+        "rollback"      => is return cmd_rollback(c, pos, o) end
+        "pin"           => is return cmd_pin(c, pos, true) end
+        "unpin"         => is return cmd_pin(c, pos, false) end
+        "cleanup"       => is return cmd_cleanup(c, o) end
+        "usage"         => is return cmd_usage(c, o) end
+        "diff"          => is return cmd_diff(c, pos, o) end
+        "browse"        => is return cmd_browse(c, pos, o) end
+        "restore"       => is return cmd_restore(c, pos, o) end
+        "status"        => is return cmd_status() end
+        "config"        => is return cmd_config(c, pos, o) end
+        "init"          => is return cmd_init(c, o) end
+        "offsite"       => is return cmd_offsite(c, pos) end
+        "roots"         => is return cmd_roots(c, pos, o) end
+        "daemon"        => is
+            if !need_root() is return 1 end
+            daemon::run()
+            return 0
+        end
+        "boot"          => is
+            if !need_root() is return 1 end
+            daemon::boot_tasks()
+            return 0
+        end
+        "tray"          => is return tray::run() end
+        "grub-entries"  => is
+            write(grub::entries(config::load()))
+            return 0
+        end
+        "grub-update"   => is
+            if !need_root() is return 1 end
+            return grub::update(config::load())
+        end
+        "apt-pre"       => is return cmd_apt_pre() end
+        "apt-post"      => is return cmd_apt_post() end
+        "notify-test"   => is
+            notify::event("error", "HackerOS Snapshots", "This is a test notification.")
+            ui::ok("sent (check the log: journalctl -t hackeros-snapshots)")
+            return 0
+        end
+        _ => is
+            ui::fail("unknown command '" + cmd + "'   (hackeros-snapshots --help)")
+            return 2
+        end
+    end
+    return 0
+end
