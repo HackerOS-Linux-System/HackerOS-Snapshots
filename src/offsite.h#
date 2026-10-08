@@ -1,0 +1,222 @@
+mod util
+mod ui
+mod config
+mod fsinfo
+mod store
+mod notify
+
+fn target(c: config::Config) -> string is
+    return config::s(c, "offsite_target")
+end
+
+fn is_remote(t: string) -> bool is
+    return string_contains(t, ":") && !string_starts_with(t, "/")
+end
+
+fn host_of(t: string) -> string is
+    return string_slice(t, 0, string_find(t, ":"))
+end
+
+fn path_of_target(t: string) -> string is
+    if !is_remote(t) is return t end
+    return string_slice(t, string_find(t, ":") + 1, string_len(t))
+end
+
+fn ssh_prefix(c: config::Config) -> string is
+    return "ssh -o BatchMode=yes -o ConnectTimeout=15 " + config::s(c, "offsite_ssh_opts") + " "
+end
+
+;; run a shell command where the copies live (locally, or on the remote host)
+fn on_target(c: config::Config, cmd: string) -> int is
+    let t: string = target(c)
+    if is_remote(t) is
+        return util::run(ssh_prefix(c) + util::sq(host_of(t)) + " " + util::sq(cmd))
+    end
+    return util::run("sh -c " + util::sq(cmd))
+end
+
+fn base_dir(c: config::Config) -> string is
+    return path_of_target(target(c)) + "/" + c.cf_name
+end
+
+fn dir_for(c: config::Config, id: int) -> string is
+    return base_dir(c) + "/" + to_string(id)
+end
+
+fn state_path(c: config::Config) -> string is
+    return "/var/lib/hackeros-snapshots/" + c.cf_name + ".offsite"
+end
+
+pub fn synced(c: config::Config) -> [int] is
+    let mut out: [int] = []
+    let lines: [string] = string_split(util::read_or(state_path(c), ""), "\n")
+    let mut i: int = 0
+    while i < array_len(lines) is
+        if util::is_num(string_trim(lines[i])) is out = array_push(out, to_int(string_trim(lines[i]))) end
+        i += 1
+    end
+    return out
+end
+
+fn save_synced(c: config::Config, ids: [int]) is
+    util::mkdir_p("/var/lib/hackeros-snapshots")
+    let mut t: string = ""
+    let mut i: int = 0
+    while i < array_len(ids) is
+        t = t + to_string(ids[i]) + "\n"
+        i += 1
+    end
+    file_write(state_path(c), t)
+end
+
+;; newest already-copied snapshot older than `id` that still exists locally (incremental parent)
+fn parent_for(c: config::Config, id: int) -> int is
+    let ids: [int] = synced(c)
+    let mut best: int = 0
+    let mut i: int = 0
+    while i < array_len(ids) is
+        if ids[i] < id && ids[i] > best && dir_exists(store::snap_path(c, ids[i])) is best = ids[i] end
+        i += 1
+    end
+    return best
+end
+
+pub fn enabled(c: config::Config) -> bool is
+    return config::b(c, "offsite") && target(c) != ""
+end
+
+;; can we reach and write the target?
+pub fn test(c: config::Config) -> bool is
+    if target(c) == "" is
+        ui::fail("offsite_target is not set")
+        return false
+    end
+    let dir: string = base_dir(c)
+    if on_target(c, "mkdir -p " + util::sq(dir) + " && test -w " + util::sq(dir)) != 0 is
+        ui::fail("cannot write to " + target(c) + " (check the path, the SSH key and permissions)")
+        return false
+    end
+    if fsinfo::effective(c) == "btrfs" is
+        if on_target(c, "[ \"$(stat -f -c %T " + util::sq(dir) + ")\" = btrfs ]") != 0 is
+            ui::fail("the target must be a btrfs filesystem for btrfs send/receive")
+            return false
+        end
+    end
+    return true
+end
+
+fn send_one(c: config::Config, id: int) -> bool is
+    let fs: string = fsinfo::effective(c)
+    let dst: string = dir_for(c, id)
+    let src: string = store::snap_path(c, id)
+    let parent: int = parent_for(c, id)
+    let t: string = target(c)
+    if on_target(c, "rm -rf " + util::sq(dst) + " && mkdir -p " + util::sq(dst)) != 0 is return false end
+
+    let mut rc: int = 1
+    if fs == "btrfs" is
+        let pflag: string = if parent > 0 then "-p " + util::sq(store::snap_path(c, parent)) + " " else ""
+        let recv: string = if is_remote(t) then ssh_prefix(c) + util::sq(host_of(t)) + " " + util::sq("btrfs receive " + util::sq(dst)) else "btrfs receive " + util::sq(dst) + " >/dev/null"
+        rc = util::run("bash -c " + util::sq("set -o pipefail; btrfs send " + pflag + util::sq(src) + " | " + recv))
+    else is
+        let link: string = if parent > 0 then "--link-dest=" + util::sq(dir_for(c, parent) + "/snapshot") + " " else ""
+        let ssh: string = if is_remote(t) then "-e " + util::sq("ssh -o BatchMode=yes -o ConnectTimeout=15 " + config::s(c, "offsite_ssh_opts")) + " " else ""
+        let rsync_to: string = if is_remote(t) then util::sq(host_of(t) + ":" + dst + "/snapshot/") else util::sq(dst + "/snapshot/")
+        on_target(c, "mkdir -p " + util::sq(dst + "/snapshot"))
+        rc = util::run("rsync -aHAX --numeric-ids " + ssh + link + util::sq(src + "/") + " " + rsync_to)
+        if rc == 24 is rc = 0 end
+    end
+    if rc != 0 is return false end
+
+    ;; the metadata travels along, so the copy is self-describing
+    if is_remote(t) is
+        util::run("cat " + util::sq(store::dir_of(c, id) + "/info") + " | " + ssh_prefix(c) + util::sq(host_of(t)) + " " + util::sq("cat > " + dst + "/info"))
+    else is
+        util::run("cp " + util::sq(store::dir_of(c, id) + "/info") + " " + util::sq(dst + "/info"))
+    end
+    return true
+end
+
+fn drop_remote(c: config::Config, id: int) -> bool is
+    let dst: string = dir_for(c, id)
+    if fsinfo::effective(c) == "btrfs" is
+        on_target(c, "btrfs subvolume delete " + util::sq(dst + "/snapshot") + " >/dev/null 2>&1")
+    end
+    return on_target(c, "rm -rf " + util::sq(dst)) == 0
+end
+
+;; keep only the newest offsite_keep copies on the target
+pub fn prune(c: config::Config) -> int is
+    let keep: int = config::n(c, "offsite_keep")
+    if keep <= 0 is return 0 end
+    let ids: [int] = synced(c)
+    if array_len(ids) <= keep is return 0 end
+    let mut kept: [int] = []
+    let mut removed: int = 0
+    let mut i: int = 0
+    while i < array_len(ids) is
+        if array_len(ids) - i > keep is
+            if drop_remote(c, ids[i]) is removed += 1 else is kept = array_push(kept, ids[i]) end
+        else is
+            kept = array_push(kept, ids[i])
+        end
+        i += 1
+    end
+    save_synced(c, kept)
+    return removed
+end
+
+;; Copies every eligible snapshot (offsite_types) that is not on the target yet.
+;; Returns the number copied, or -1 when the target is unusable / a copy failed.
+pub fn sync(c: config::Config) -> int is
+    if !enabled(c) is return 0 end
+    if !util::is_root() is
+        ui::fail("offsite sync needs root")
+        return -1
+    end
+    if !test(c) is
+        notify::event("error", "HackerOS Snapshots: offsite backup", "Target " + target(c) + " is not reachable (config " + c.cf_name + ").")
+        return -1
+    end
+    let types: [string] = util::csv(config::s(c, "offsite_types"))
+    let have: [int] = synced(c)
+    let list: [store::Snap] = store::all(c)
+    let mut done: int = 0
+    let mut failed: bool = false
+    let mut i: int = 0
+    while i < array_len(list) && !failed is
+        let s: store::Snap = list[i]
+        i += 1
+        if util::has_int(have, s.sn_id) || !util::has_str(types, s.sn_type) is continue end
+        ui::line("copying snapshot #" + to_string(s.sn_id) + " → " + target(c) + " …")
+        if send_one(c, s.sn_id) is
+            have = array_push(have, s.sn_id)
+            save_synced(c, have)
+            done += 1
+            ui::ok("#" + to_string(s.sn_id) + " copied")
+        else is
+            failed = true
+            notify::event("error", "HackerOS Snapshots: offsite backup", "Copying snapshot #" + to_string(s.sn_id) + " to " + target(c) + " failed (config " + c.cf_name + ").")
+        end
+    end
+    prune(c)
+    if failed is return -1 end
+    if done > 0 is notify::info("offsite: copied " + to_string(done) + " snapshot(s) of config " + c.cf_name + " to " + target(c)) end
+    return done
+end
+
+pub fn status(c: config::Config) is
+    let ids: [int] = synced(c)
+    ui::heading("Offsite backup — config " + c.cf_name)
+    ui::line(util::pad_right("enabled", 16) + util::bool_str(config::b(c, "offsite")))
+    ui::line(util::pad_right("target", 16) + (if target(c) == "" then "(not set)" else target(c)))
+    ui::line(util::pad_right("types", 16) + config::s(c, "offsite_types") + "   keep " + to_string(config::n(c, "offsite_keep")) + " on target")
+    let mut list: string = ""
+    let mut i: int = 0
+    while i < array_len(ids) is
+        list = list + "#" + to_string(ids[i]) + " "
+        i += 1
+    end
+    ui::line(util::pad_right("copied", 16) + (if list == "" then "nothing yet" else list))
+    ui::blank()
+end
