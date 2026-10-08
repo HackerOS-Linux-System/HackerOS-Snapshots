@@ -1,0 +1,83 @@
+mod util
+mod config
+
+fn root_cfg() -> config::Config is
+    return config::load()
+end
+
+fn emit(level: string, prio: string, msg: string) is
+    let lf: string = config::s(root_cfg(), "log_file")
+    let mut cmd: string = "m=" + util::sq(util::one_line(msg)) + "; logger -t hackeros-snapshots -p daemon." + prio + " -- \"$m\" 2>/dev/null; "
+    if lf != "" is
+        let f: string = util::sq(lf)
+        cmd = cmd + "if [ -f " + f + " ] && [ \"$(stat -c %s " + f + " 2>/dev/null || echo 0)\" -gt 1048576 ]; then mv -f " + f + " " + util::sq(lf + ".1") + "; fi; "
+        cmd = cmd + "printf '%s %s %s\\n' \"$(date '+%F %T')\" " + util::sq(level) + " \"$m\" >> " + f + " 2>/dev/null; "
+    end
+    util::run(cmd + "true")
+end
+
+pub fn info(msg: string)  is emit("INFO",  "info",    msg) end
+pub fn warn(msg: string)  is emit("WARN",  "warning", msg) end
+pub fn error(msg: string) is emit("ERROR", "err",     msg) end
+
+;; One notification per logged-in graphical session. As root the daemon has to hop
+;; into each user's session bus; as a normal user a plain notify-send is enough.
+fn desktop(title: string, msg: string, urgency: string, icon: string) is
+    if !util::tool_exists("notify-send") is return end
+    let vars: string = "t=" + util::sq(title) + "; m=" + util::sq(util::one_line(msg)) + "; "
+    if util::is_root() is
+        let mut script: string = "for d in /run/user/*; do uid=$(basename \"$d\"); [ -S \"$d/bus\" ] || continue; u=$(id -nu \"$uid\" 2>/dev/null) || continue; "
+        script = script + "runuser -u \"$u\" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=$d/bus notify-send -a HackerOS-Snapshots -u " + urgency + " -i " + icon + " \"$t\" \"$m\" >/dev/null 2>&1 & done; wait"
+        util::run(vars + script)
+    else is
+        util::run(vars + "notify-send -a HackerOS-Snapshots -u " + urgency + " -i " + icon + " \"$t\" \"$m\" >/dev/null 2>&1")
+    end
+end
+
+;; kind: "error" | "warn" | "info"
+pub fn event(kind: string, title: string, msg: string) is
+    if kind == "error" is
+        error(title + ": " + msg)
+    else if kind == "warn" is
+        warn(title + ": " + msg)
+    else is
+        info(title + ": " + msg)
+    end
+    let lvl: string = config::s(root_cfg(), "notify_level")
+    if lvl == "off" is return end
+    if kind == "info" && lvl != "all" is return end
+    if kind == "error" is
+        desktop(title, msg, "critical", "dialog-error")
+    else if kind == "warn" is
+        desktop(title, msg, "normal", "dialog-warning")
+    else is
+        desktop(title, msg, "low", "drive-harddisk")
+    end
+end
+
+;; ── health file (read by the tray icon and the GUI) ─────────────────────────
+
+pub fn health_path() -> string is
+    return "/run/hackeros-snapshots/status"
+end
+
+;; state: ok | warn | error
+pub fn set_health(state: string, msg: string) is
+    if !util::is_root() is return end
+    util::mkdir_p("/run/hackeros-snapshots")
+    util::run("chmod 755 /run/hackeros-snapshots")
+    util::write_file(health_path(), "state=" + state + "\nmessage=" + util::one_line(msg) + "\ntime=" + to_string(util::now_epoch()) + "\n")
+    util::run("chmod 644 " + util::sq(health_path()))
+end
+
+pub fn health_field(key: string, fallback: string) -> string is
+    let lines: [string] = string_split(util::read_or(health_path(), ""), "\n")
+    let mut i: int = 0
+    while i < array_len(lines) is
+        if string_starts_with(lines[i], key + "=") is
+            return string_slice(lines[i], string_len(key) + 1, string_len(lines[i]))
+        end
+        i += 1
+    end
+    return fallback
+end
