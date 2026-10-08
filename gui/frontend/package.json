@@ -1,0 +1,24 @@
+{
+  "name": "hackeros-snapshots-gui-frontend",
+  "private": true,
+  "version": "0.3.0",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "esbuild ../tests/parse.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/hs-parse-test.cjs --log-level=error && node /tmp/hs-parse-test.cjs",
+    "test:ui": "sh ../tests/run-ui-test.sh",
+    "build:dev": "node build.mjs --dev"
+  },
+  "dependencies": {
+    "solid-js": "^1.9.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.0",
+    "@babel/preset-typescript": "^7.24.0",
+    "babel-preset-solid": "^1.9.0",
+    "esbuild": "^0.21.0",
+    "esbuild-plugin-solid": "^0.6.0",
+    "typescript": "^5.4.0"
+  }
+}
